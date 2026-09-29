@@ -6,6 +6,6 @@ load_dotenv()
 
 class Config:
     # Busca la variable, y si el archivo .env falla, usa el string por defecto
-    EXCEL_SIU_FILENAME = os.getenv("EXCEL_SIU_FILENAME", "estadisticas_fin_cursada.xlsx")
+    EXCEL_SIU_FILENAME = os.getenv("EXCEL_SIU_FILENAME", "estadisticas de fin de cursada.xlsx")
 
 config = Config()
