@@ -1,7 +1,15 @@
-# Archivos de datos crudos (excelinput)
+# Archivos de datos crudos (Excel input SIU Guaraní)
 files/
 *.xlsx
 *.csv
+
+# Base de datos SQLite generada localmente (se crea al correr el pipeline)
+*.db
+*.db-shm
+*.db-wal
+
+# Carpeta de agentes/tareas internas (generada por Kiro)
+.agents/
 
 ###################################################################################
 ####### Template .gitignore oficial por defecto para proyectos de Python. #########
