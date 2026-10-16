@@ -109,11 +109,32 @@ FastAPI genera automáticamente una interfaz para explorar y probar los endpoint
 
 ### Inspeccionar la base de datos
 
-Para verificar el contenido de la DB directamente desde la terminal (requiere tener `sqlite3` instalado):
+**Opción A — Usando Python (sin instalar nada extra):**
 
 ```bash
-sqlite3 hurdata.db
+python -c "
+import sqlite3
+conn = sqlite3.connect('hurdata.db')
+conn.row_factory = sqlite3.Row
+for t in conn.execute(\"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\").fetchall():
+    n = conn.execute(f'SELECT COUNT(*) FROM {t[0]}').fetchone()[0]
+    print(f'{t[0]}: {n} filas')
+"
 ```
+
+**Opción B — Usando el cliente sqlite3 (Windows):**
+
+1. Descargar el zip desde [sqlite.org/download](https://www.sqlite.org/download.html) → sección *Precompiled Binaries for Windows* → **sqlite-tools-win-x64-\*.zip**
+2. Descomprimir y copiar el contenido (incluyendo `sqlite3.exe`) a una carpeta, por ejemplo `C:\Program Files (x86)\SQLite3\`
+3. Agregar esa carpeta al PATH del usuario: *Panel de control → Variables de entorno → Path → Nuevo*
+4. Para aplicar el PATH en una terminal ya abierta sin cerrarla:
+   ```powershell
+   $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+   ```
+5. Luego, desde la raíz del proyecto:
+   ```bash
+   sqlite3 hurdata.db
+   ```
 
 Comandos útiles dentro de la consola SQLite:
 ```sql
