@@ -7,9 +7,9 @@ Para correr en desarrollo:
     uvicorn app.api.main:app --reload
 
 Endpoints disponibles en esta versión:
-    GET  /health         → estado de la API y la DB
-    GET  /api/datos      → obtiene los datos académicos guardados en SQLite
-    POST /upload         → carga un Excel del SIU y ejecuta el pipeline ETL
+    GET  /health        → estado de la API y la DB
+    GET  /api/datos     → obtiene los datos académicos guardados en SQLite (soporta filtro ?periodo=...)
+    POST /upload        → carga un Excel del SIU y ejecuta el pipeline ETL
 """
 
 import sqlite3
@@ -17,8 +17,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
 import tempfile
+from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.init_db import init_db
@@ -90,9 +91,15 @@ def health_check():
 
 
 @app.get("/api/datos", tags=["Consultas"])
-def obtener_datos_guardados():
+def obtener_datos_guardados(
+    periodo: Optional[str] = Query(
+        None, 
+        description="Filtro opcional por período lectivo (ej: 'PRIMER CUATRIMESTRE' o 'SEGUNDO CUATRIMESTRE')"
+    )
+):
     """
-    Retorna la jerarquía exacta esperada por transformarDatosBackend() en React.
+    Retorna la jerarquía exacta esperada por transformarDatosBackend() en React,
+    filtrando por el período seleccionado mediante el JOIN a la tabla 'Periodo'.
     """
     conn = get_connection()
     cursor = conn.cursor()
@@ -107,23 +114,36 @@ def obtener_datos_guardados():
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute("""
+    # Consulta ajustada al schema.sql físico (JOIN con Periodo)
+    query = """
         SELECT 
             m.codigo as codigo_materia,
             m.nombre as materia_nombre,
             c.id_comision,
             c.numero_comision,
             c.nombre_completo as comision_nombre,
+            p.anio as anio_academico,
+            p.cuatrimestre as cuatrimestre_nombre,
             mod.nombre as modalidad_nombre,
             e.nombre as estado_nombre,
             rc.cantidad_alumnos
         FROM Materia m
         JOIN Comision c ON m.id_materia = c.id_materia
+        JOIN Periodo p ON c.id_periodo = p.id_periodo
         LEFT JOIN Modalidad mod ON c.id_modalidad = mod.id_modalidad
         LEFT JOIN Resultado_Comision rc ON c.id_comision = rc.id_comision
         LEFT JOIN Estado e ON rc.id_estado = e.id_estado
-    """)
+    """
 
+    params = []
+    # Filtro dinámico según la opción seleccionada en el Frontend
+    if periodo:
+        if "PRIMER" in periodo.upper() or "1C" in periodo.upper():
+            query += " WHERE UPPER(p.cuatrimestre) LIKE '%PRIMER%'"
+        elif "SEGUNDO" in periodo.upper() or "2C" in periodo.upper():
+            query += " WHERE UPPER(p.cuatrimestre) LIKE '%SEGUNDO%'"
+
+    cursor.execute(query, params)
     filas = cursor.fetchall()
     conn.close()
 
@@ -152,6 +172,7 @@ def obtener_datos_guardados():
                 "numero_comision": fila.get("numero_comision"),
                 "modalidad": fila.get("modalidad_nombre") or "PRESENCIAL",
                 "nombre_completo": fila.get("comision_nombre"),
+                "periodo_lectivo": f"{fila.get('anio_academico')} - {fila.get('cuatrimestre_nombre')}",
                 "estados": []
             }
 
@@ -169,6 +190,40 @@ def obtener_datos_guardados():
 
     return {"actividades": actividades}
 
+@app.get("/api/periodos", tags=["Consultas"])
+def obtener_periodos_disponibles():
+    """
+    Retorna los períodos cargados en SQLite formateados para el selector del frontend.
+    """
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    try:
+        # Trae todos los períodos distintos registrados en la tabla Periodo
+        cursor.execute("""
+            SELECT DISTINCT id_periodo, anio, cuatrimestre, label
+            FROM Periodo
+            ORDER BY anio DESC, cuatrimestre ASC
+        """)
+        filas = cursor.fetchall()
+        conn.close()
+
+        # Asegura devolver siempre la etiqueta armada
+        resultado = []
+        for f in filas:
+            dict_f = dict(f)
+            if not dict_f.get("label"):
+                dict_f["label"] = f"{dict_f['anio']} - {dict_f['cuatrimestre']}"
+            resultado.append(dict_f)
+
+        return {"periodos": resultado}
+    except Exception as e:
+        conn.close()
+        print(f"[ERROR /api/periodos]: {e}")
+        return {"periodos": []}
+    
+    
 @app.post("/upload", tags=["ETL"], status_code=201)
 async def upload_excel(archivo: UploadFile = File(...)):
     """

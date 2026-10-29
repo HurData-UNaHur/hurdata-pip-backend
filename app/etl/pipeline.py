@@ -4,7 +4,7 @@ pipeline.py
 Responsabilidad: orquestar las tres etapas del ETL en orden:
     1. Extract  → ExcelExtractor lee el archivo y devuelve el DataFrame crudo.
     2. Transform → ExcelTransformer estructura los datos en un dict jerárquico.
-    3. Load     → cargar_reporte() persiste el dict en SQLite.
+    3. Load     → cargar_reporte() persiste el dict en SQLite de forma acumulativa y selectiva.
 
 Uso directo (debug/carga manual):
     python -m app.etl.pipeline
@@ -14,8 +14,8 @@ from pathlib import Path
 
 from app.etl.extractor import ExcelExtractor
 from app.etl.transformer import ExcelTransformer
-from app.db.init_db import init_db
 from app.db.loader import cargar_reporte
+from app.db.init_db import init_db
 from app.config import config
 
 
@@ -52,10 +52,10 @@ def ejecutar_etl(ruta_excel: Path | None = None) -> dict:
     datos = transformer.estructurar_a_json(df_raw)
 
     # ------------------------------------------------------------------
-    # 3. LOAD — inicializar esquema (idempotente) y persistir en SQLite
+    # 3. LOAD — inicializar esquema si no existe y persistir en SQLite
     # ------------------------------------------------------------------
-    init_db()
-    resumen = cargar_reporte(datos)
+    init_db()  # Crea las tablas si no existen sin borrar los datos acumulados
+    resumen = cargar_reporte(datos)  # Reemplaza únicamente el período procesado
 
     return resumen
 
