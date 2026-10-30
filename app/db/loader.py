@@ -46,15 +46,13 @@ def cargar_reporte(datos: dict) -> dict:
             anio_academico = int(match.group(0)) if match else 2021
 
         cuatrimestre_raw = str(datos.get("cuatrimestre") or "").upper().strip()
-        
-        # DECLARACIÓN CLAVE DE LA VARIABLE
         nombre_carrera = datos.get("nombre_carrera") or "Licenciatura en Informática"
 
-        # Limpieza de valores espurios
+        # Limpieza de valores espurios de filtros SIU
         if "IGUAL" in cuatrimestre_raw or "CONTIENE" in cuatrimestre_raw or len(cuatrimestre_raw) > 35:
             cuatrimestre_raw = ""
 
-        # Normalización del cuatrimestre (Prioridad a Segundo Cuatrimestre)
+        # Normalización del cuatrimestre
         if re.search(r'(SEGUNDO|2\s*C|2º|2°)', cuatrimestre_raw):
             cuatrimestre = "SEGUNDO CUATRIMESTRE"
         elif re.search(r'(PRIMER|1\s*C|1º|1°)', cuatrimestre_raw):
@@ -78,19 +76,32 @@ def cargar_reporte(datos: dict) -> dict:
             """, (anio_academico, cuatrimestre))
             id_periodo = cursor.lastrowid
 
-        # 2. LIMPIEZA SELECTIVA: Eliminar datos anteriores de ESTE período únicamente
-        cursor.execute("""
-            DELETE FROM Resultado_Comision 
-            WHERE id_comision IN (
-                SELECT id_comision FROM Comision WHERE id_periodo = ?
-            );
-        """, (id_periodo,))
+        # 2. LIMPIEZA SELECTIVA: Eliminar únicamente los datos de las MATERIAS incluidas en este reporte
+        materias_reporte = [act.get("codigo_materia") or "000" for act in datos.get("actividades", [])]
+        
+        if materias_reporte:
+            placeholders = ",".join("?" for _ in materias_reporte)
+            
+            # Elimina resultados de comisiones de este período y de estas materias específicas
+            cursor.execute(f"""
+                DELETE FROM Resultado_Comision 
+                WHERE id_comision IN (
+                    SELECT c.id_comision 
+                    FROM Comision c
+                    JOIN Materia m ON c.id_materia = m.id_materia
+                    WHERE c.id_periodo = ? AND m.codigo IN ({placeholders})
+                );
+            """, [id_periodo] + materias_reporte)
 
-        cursor.execute("""
-            DELETE FROM Comision WHERE id_periodo = ?;
-        """, (id_periodo,))
+            # Elimina comisiones de este período y de estas materias específicas
+            cursor.execute(f"""
+                DELETE FROM Comision 
+                WHERE id_periodo = ? AND id_materia IN (
+                    SELECT id_materia FROM Materia WHERE codigo IN ({placeholders})
+                );
+            """, [id_periodo] + materias_reporte)
 
-        # 3. Resolver/Insertar Carrera (Acá se usaba nombre_carrera)
+        # 3. Resolver/Insertar Carrera
         cursor.execute("SELECT id_carrera FROM Carrera WHERE nombre = ?", (nombre_carrera,))
         row_c = cursor.fetchone()
         
@@ -107,12 +118,11 @@ def cargar_reporte(datos: dict) -> dict:
             cursor.execute("SELECT id_carrera FROM Carrera WHERE nombre = ?", (nombre_carrera,))
             id_carrera = cursor.fetchone()[0]
 
-            
+        # 4. Recorrer e Insertar Materias, Comisiones y Resultados
         for actividad in datos.get("actividades", []):
             nombre_materia = actividad.get("nombre")
             codigo_materia = actividad.get("codigo_materia") or "000"
 
-            # 4. Insertar / Obtener Materia
             cursor.execute("SELECT id_materia FROM Materia WHERE codigo = ?", (codigo_materia,))
             row_m = cursor.fetchone()
             if row_m:
@@ -134,16 +144,13 @@ def cargar_reporte(datos: dict) -> dict:
                 modalidad_str = (comision.get("modalidad") or "Presencial").title()
                 nombre_completo = comision.get("nombre_completo") or f"COMISIÓN {num_comision}"
 
-                # Resolver Modalidad
                 id_modalidad = obtener_o_crear_id(cursor, "Modalidad", "id_modalidad", "nombre", modalidad_str)
 
-                # 5. Insertar o Ignorar Comisión
                 cursor.execute("""
                     INSERT OR IGNORE INTO Comision (id_periodo, id_materia, id_modalidad, numero_comision, nombre_completo)
                     VALUES (?, ?, ?, ?, ?)
                 """, (id_periodo, id_materia, id_modalidad, num_comision, nombre_completo))
 
-                # Obtener el id_comision
                 cursor.execute("""
                     SELECT id_comision FROM Comision 
                     WHERE id_periodo = ? AND id_materia = ? AND numero_comision = ?
@@ -152,12 +159,10 @@ def cargar_reporte(datos: dict) -> dict:
                 id_comision = cursor.fetchone()[0]
                 total_comisiones += 1
 
-                # 6. Insertar Resultados por Estado
                 for estado_item in comision.get("estados", []):
                     estado_str = (estado_item.get("estado") or "Sin Condición").title()
                     total_alumnos = estado_item.get("total_alumnos") or 0
 
-                    # Resolver Estado
                     id_estado = obtener_o_crear_id(cursor, "Estado", "id_estado", "nombre", estado_str)
 
                     cursor.execute("""
@@ -179,6 +184,7 @@ def cargar_reporte(datos: dict) -> dict:
     return {
         "periodo_id": id_periodo,
         "periodo": label_periodo,
+        "nombre_carrera": nombre_carrera,
         "materias_procesadas": total_materias,
         "comisiones_procesadas": total_comisiones,
         "resultados_guardados": total_resultados

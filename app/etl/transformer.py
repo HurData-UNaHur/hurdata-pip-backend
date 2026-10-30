@@ -156,19 +156,35 @@ class ExcelTransformer:
 
     def _parsear_propuesta(self, valor: str) -> dict:
         """
-        Descompone el string de propuesta en código y nombre de carrera.
+        Limpia el string de propuesta eliminado prefijos del SIU Guaraní y códigos.
 
-        Ejemplo: '(023) Licenciatura en Informática'
+        Ejemplo input:  'Propuesta es igual a (085) Licenciatura en Kinesiología y Fisiatría'
         Retorna:
-            codigo_carrera  → '023'                         → (referencia futura)
-            nombre_carrera  → 'Licenciatura en Informática' → Carrera.Nombre_Carrera
+            codigo_carrera  → '085'
+            nombre_carrera  → 'Licenciatura en Kinesiología y Fisiatría'
         """
         valor = str(valor).strip()
-        match = re.match(r'\((\d+)\)\s*(.+)', valor)
-        if match:
-            return {"codigo_carrera": match.group(1), "nombre_carrera": match.group(2).strip()}
-        return {"codigo_carrera": None, "nombre_carrera": valor}
 
+        # 1. Extraer el código entre paréntesis si existe: (085)
+        match_codigo = re.search(r'\(([^)]+)\)', valor)
+        codigo_carrera = match_codigo.group(1).strip() if match_codigo else None
+
+        # 2. Limpiar prefijos conocidos del SIU ('Propuesta', 'es igual a', HTML)
+        limpio = re.sub(r'</?[^>]+>', '', valor)  # Quita tags HTML si existieran
+        limpio = re.sub(r'(?i)propuesta', '', limpio)
+        limpio = re.sub(r'(?i)es\s+igual\s+a', '', limpio)
+        limpio = re.sub(r'\([^)]+\)', '', limpio)  # Quita el paréntesis y su contenido (085)
+        
+        nombre_carrera = limpio.strip()
+
+        # Si tras limpiar queda vacío, fallback al valor original
+        if not nombre_carrera:
+            nombre_carrera = valor
+
+        return {
+            "codigo_carrera": codigo_carrera,
+            "nombre_carrera": nombre_carrera
+        }
     # -------------------------------------------------------------------------
     # Parseo de metadatos globales (primeras filas del Excel)
     # -------------------------------------------------------------------------

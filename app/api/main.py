@@ -8,7 +8,9 @@ Para correr en desarrollo:
 
 Endpoints disponibles en esta versión:
     GET  /health        → estado de la API y la DB
-    GET  /api/datos     → obtiene los datos académicos guardados en SQLite (soporta filtro ?periodo=...)
+    GET  /api/periodos   → obtiene la lista de períodos dinámicos
+    GET  /api/carreras   → obtiene la lista de carreras guardadas en SQLite
+    GET  /api/datos     → obtiene los datos académicos guardados en SQLite (soporta filtros ?periodo=...&carrera=...)
     POST /upload        → carga un Excel del SIU y ejecuta el pipeline ETL
 """
 
@@ -73,13 +75,7 @@ app.add_middleware(
 
 @app.get("/health", tags=["Sistema"])
 def health_check():
-    """
-    Verifica que la API y la DB estén operativas.
-
-    Retorna:
-        - status: "ok"
-        - db_tablas: lista de tablas presentes en la DB
-    """
+    """Verifica que la API y la DB estén operativas."""
     conn = get_connection()
     tablas = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -90,31 +86,89 @@ def health_check():
     }
 
 
-@app.get("/api/datos", tags=["Consultas"])
-def obtener_datos_guardados(
-    periodo: Optional[str] = Query(
-        None, 
-        description="Filtro opcional por período lectivo (ej: 'PRIMER CUATRIMESTRE' o 'SEGUNDO CUATRIMESTRE')"
-    )
+@app.get("/api/carreras", tags=["Consultas"])
+def obtener_carreras_disponibles(
+    periodo: Optional[str] = Query(None, description="Filtro opcional por período")
 ):
     """
-    Retorna la jerarquía exacta esperada por transformarDatosBackend() en React,
-    filtrando por el período seleccionado mediante el JOIN a la tabla 'Periodo'.
+    Retorna la lista de carreras guardadas en SQLite para un período dado.
     """
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    try:
+        if periodo:
+            query = """
+                SELECT DISTINCT car.id_carrera, car.nombre 
+                FROM Carrera car
+                JOIN Carrera_Materia cm ON car.id_carrera = cm.id_carrera
+                JOIN Comision c ON cm.id_materia = c.id_materia
+                JOIN Periodo p ON c.id_periodo = p.id_periodo
+                WHERE (p.anio || ' - ' || p.cuatrimestre) = ? OR p.label = ?
+                ORDER BY car.nombre ASC
+            """
+            cursor.execute(query, (periodo, periodo))
+        else:
+            cursor.execute("SELECT DISTINCT id_carrera, nombre FROM Carrera ORDER BY nombre ASC")
+
+        filas = cursor.fetchall()
+        conn.close()
+
+        # Limpiar prefijos numéricos de SIU si existen (ej. "(023) Licenciatura..." -> "Licenciatura...")
+        carreras = []
+        for f in filas:
+            nombre_raw = f["nombre"]
+            carreras.append({"id": f["id_carrera"], "nombre": nombre_raw})
+
+        return {"carreras": carreras}
+    except Exception as e:
+        conn.close()
+        print(f"[ERROR /api/carreras]: {e}")
+        return {"carreras": []}
+
+
+@app.get("/api/datos", tags=["Consultas"])
+def obtener_datos_guardados(
+    periodo: Optional[str] = Query(None, description="Filtro por período lectivo"),
+    carrera: Optional[str] = Query(None, description="Filtro por carrera")
+):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='Materia'"
-    )
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Materia'")
     if not cursor.fetchone():
         conn.close()
-        return {"actividades": []}
+        return {"actividades": [], "nombre_carrera": "", "carreras_disponibles": []}
 
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Consulta ajustada al schema.sql físico (JOIN con Periodo)
+    # 1. BÚSQUEDA DE TODAS LAS CARRERAS EXISTENTES EN ESTE PERÍODO
+    query_carreras = """
+        SELECT DISTINCT car.nombre 
+        FROM Carrera car
+        JOIN Carrera_Materia cm ON car.id_carrera = cm.id_carrera
+        JOIN Comision c ON cm.id_materia = c.id_materia
+        JOIN Periodo p ON c.id_periodo = p.id_periodo
+    """
+    params_carreras = []
+    if periodo:
+        query_carreras += " WHERE (p.anio || ' - ' || p.cuatrimestre) = ? OR p.label = ?"
+        params_carreras.extend([periodo, periodo])
+
+    cursor.execute(query_carreras, params_carreras)
+    filas_carreras = cursor.fetchall()
+    carreras_periodo = [r["nombre"] for r in filas_carreras]
+
+    # Si la consulta por JOIN dio vacía, buscar directo en Carrera
+    if not carreras_periodo:
+        cursor.execute("SELECT DISTINCT nombre FROM Carrera")
+        carreras_periodo = [r["nombre"] for r in cursor.fetchall()]
+
+    carrera_target = carrera if (carrera and carrera.strip()) else None
+
+    # 2. BÚSQUEDA DE MATERIAS Y COMISIONES DE LA CARRERA SELECCIONADA
     query = """
         SELECT 
             m.codigo as codigo_materia,
@@ -124,36 +178,50 @@ def obtener_datos_guardados(
             c.nombre_completo as comision_nombre,
             p.anio as anio_academico,
             p.cuatrimestre as cuatrimestre_nombre,
+            p.label as label_periodo,
             mod.nombre as modalidad_nombre,
             e.nombre as estado_nombre,
-            rc.cantidad_alumnos
+            rc.cantidad_alumnos,
+            car.nombre as carrera_nombre
         FROM Materia m
         JOIN Comision c ON m.id_materia = c.id_materia
         JOIN Periodo p ON c.id_periodo = p.id_periodo
+        LEFT JOIN Carrera_Materia cm ON m.id_materia = cm.id_materia
+        LEFT JOIN Carrera car ON cm.id_carrera = car.id_carrera
         LEFT JOIN Modalidad mod ON c.id_modalidad = mod.id_modalidad
         LEFT JOIN Resultado_Comision rc ON c.id_comision = rc.id_comision
         LEFT JOIN Estado e ON rc.id_estado = e.id_estado
+        WHERE 1=1
     """
 
     params = []
-    # Filtro dinámico según la opción seleccionada en el Frontend
     if periodo:
-        if "PRIMER" in periodo.upper() or "1C" in periodo.upper():
-            query += " WHERE UPPER(p.cuatrimestre) LIKE '%PRIMER%'"
-        elif "SEGUNDO" in periodo.upper() or "2C" in periodo.upper():
-            query += " WHERE UPPER(p.cuatrimestre) LIKE '%SEGUNDO%'"
+        query += " AND ((p.anio || ' - ' || p.cuatrimestre) = ? OR p.label = ?)"
+        params.extend([periodo, periodo])
+        
+    if carrera_target:
+        query += " AND (car.nombre = ? OR car.nombre LIKE ?)"
+        params.extend([carrera_target, f"%{carrera_target}%"])
 
     cursor.execute(query, params)
     filas = cursor.fetchall()
     conn.close()
 
     if not filas:
-        return {"actividades": []}
+        return {
+            "actividades": [], 
+            "nombre_carrera": carrera_target or (carreras_periodo[0] if carreras_periodo else ""),
+            "carreras_disponibles": carreras_periodo
+        }
 
     actividades_dict = {}
+    nombre_carrera_detectado = None
 
     for f in filas:
         fila = dict(f)
+        if not nombre_carrera_detectado and fila.get("carrera_nombre"):
+            nombre_carrera_detectado = fila.get("carrera_nombre")
+
         codigo = fila.get("codigo_materia") or "000"
         materia_nombre = fila.get("materia_nombre")
 
@@ -168,11 +236,12 @@ def obtener_datos_guardados(
         comisiones_dict = actividades_dict[codigo]["comisiones_dict"]
 
         if com_id not in comisiones_dict:
+            label_p = fila.get("label_periodo") or f"{fila.get('anio_academico')} - {fila.get('cuatrimestre_nombre')}"
             comisiones_dict[com_id] = {
                 "numero_comision": fila.get("numero_comision"),
                 "modalidad": fila.get("modalidad_nombre") or "PRESENCIAL",
                 "nombre_completo": fila.get("comision_nombre"),
-                "periodo_lectivo": f"{fila.get('anio_academico')} - {fila.get('cuatrimestre_nombre')}",
+                "periodo_lectivo": label_p,
                 "estados": []
             }
 
@@ -188,7 +257,14 @@ def obtener_datos_guardados(
         del act["comisiones_dict"]
         actividades.append(act)
 
-    return {"actividades": actividades}
+    carrera_final = nombre_carrera_detectado or carrera_target or (carreras_periodo[0] if carreras_periodo else "")
+
+    return {
+        "nombre_carrera": carrera_final,
+        "carreras_disponibles": carreras_periodo,
+        "actividades": actividades
+    }
+
 
 @app.get("/api/periodos", tags=["Consultas"])
 def obtener_periodos_disponibles():
@@ -200,7 +276,6 @@ def obtener_periodos_disponibles():
     cursor = conn.cursor()
 
     try:
-        # Trae todos los períodos distintos registrados en la tabla Periodo
         cursor.execute("""
             SELECT DISTINCT id_periodo, anio, cuatrimestre, label
             FROM Periodo
@@ -209,7 +284,6 @@ def obtener_periodos_disponibles():
         filas = cursor.fetchall()
         conn.close()
 
-        # Asegura devolver siempre la etiqueta armada
         resultado = []
         for f in filas:
             dict_f = dict(f)
@@ -227,14 +301,7 @@ def obtener_periodos_disponibles():
 @app.post("/upload", tags=["ETL"], status_code=201)
 async def upload_excel(archivo: UploadFile = File(...)):
     """
-    Recibe un archivo .xlsx del SIU Guaraní, ejecuta el pipeline ETL completo
-    (Extract → Transform → Load) y persiste los datos en la DB.
-
-    Args:
-        archivo: archivo .xlsx enviado como form-data (campo 'archivo').
-
-    Returns:
-        Resumen de la carga con cantidades de materias, comisiones y resultados.
+    Recibe un archivo .xlsx del SIU Guaraní y ejecuta el pipeline ETL.
     """
     if not archivo.filename or not archivo.filename.lower().endswith(".xlsx"):
         raise HTTPException(
