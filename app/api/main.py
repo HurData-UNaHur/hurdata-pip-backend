@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db.init_db import init_db
 from app.db.connection import get_connection
 from app.etl.pipeline import ejecutar_etl
+from app.db.reset_db import resetear_base_datos
 
 
 # ---------------------------------------------------------------------------
@@ -327,3 +328,130 @@ async def upload_excel(archivo: UploadFile = File(...)):
         "message": "Archivo procesado correctamente.",
         "resumen": resumen,
     }
+    # Borrar por completo la base de datos.
+
+@app.get("/api/periodos-carreras", tags=["Consultas"])
+def obtener_periodos_con_carreras():
+    """
+    Retorna todas las combinaciones período + carrera cargadas en la DB.
+    Cada fila representa un Excel cargado identificable individualmente.
+    """
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT DISTINCT
+                p.id_periodo,
+                p.anio,
+                p.cuatrimestre,
+                p.label,
+                car.id_carrera,
+                car.nombre AS nombre_carrera
+            FROM Periodo p
+            JOIN Comision c ON p.id_periodo = c.id_periodo
+            JOIN Materia m ON c.id_materia = m.id_materia
+            JOIN Carrera_Materia cm ON m.id_materia = cm.id_materia
+            JOIN Carrera car ON cm.id_carrera = car.id_carrera
+            ORDER BY p.anio DESC, p.cuatrimestre ASC, car.nombre ASC
+        """)
+        filas = cursor.fetchall()
+        conn.close()
+
+        resultado = [
+            {
+                "id_periodo": f["id_periodo"],
+                "id_carrera": f["id_carrera"],
+                "label": f["label"] or f"{f['anio']} - {f['cuatrimestre']}",
+                "nombre_carrera": f["nombre_carrera"],
+            }
+            for f in filas
+        ]
+        return {"periodos": resultado}
+    except Exception as e:
+        conn.close()
+        print(f"[ERROR /api/periodos-carreras]: {e}")
+        return {"periodos": []}
+
+
+@app.delete("/api/limpiar-db", tags=["ETL"])
+def limpiar_base_datos():
+    """Ejecuta el script reset_db para vaciar SQLite."""
+    try:
+        resetear_base_datos() 
+        return {"message": "Base de datos reiniciada con éxito."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al reiniciar la DB: {str(e)}")
+
+    # Borrar un archivo en concreto.
+@app.delete("/api/periodos/{id_periodo}", tags=["ETL"])
+def eliminar_periodo(id_periodo: int, id_carrera: Optional[int] = Query(None)):
+    """
+    Elimina un período (opcionalmente filtrado por carrera).
+    - Sin id_carrera: borra el período completo con todas sus carreras.
+    - Con id_carrera: borra solo los datos de esa carrera en ese período.
+      Si era la última carrera del período, borra el período también.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT id_periodo, anio, cuatrimestre FROM Periodo WHERE id_periodo = ?", (id_periodo,))
+        periodo = cursor.fetchone()
+        if not periodo:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"No se encontró el período con id {id_periodo}.")
+
+        label = f"{periodo['anio']} - {periodo['cuatrimestre']}"
+        cursor.execute("PRAGMA foreign_keys = OFF;")
+
+        if id_carrera:
+            # Borrar solo comisiones de materias vinculadas a esta carrera en este período
+            cursor.execute("""
+                DELETE FROM Resultado_Comision
+                WHERE id_comision IN (
+                    SELECT c.id_comision FROM Comision c
+                    JOIN Carrera_Materia cm ON c.id_materia = cm.id_materia
+                    WHERE c.id_periodo = ? AND cm.id_carrera = ?
+                )
+            """, (id_periodo, id_carrera))
+
+            cursor.execute("""
+                DELETE FROM Comision
+                WHERE id_periodo = ? AND id_materia IN (
+                    SELECT id_materia FROM Carrera_Materia WHERE id_carrera = ?
+                )
+            """, (id_periodo, id_carrera))
+
+            # Si ya no quedan comisiones en este período, borrar el período también
+            cursor.execute("SELECT COUNT(*) as total FROM Comision WHERE id_periodo = ?", (id_periodo,))
+            restantes = cursor.fetchone()["total"]
+            if restantes == 0:
+                cursor.execute("DELETE FROM Periodo WHERE id_periodo = ?", (id_periodo,))
+
+            msg = f"Carrera eliminada del período '{label}' con éxito."
+        else:
+            # Borrar período completo
+            cursor.execute("""
+                DELETE FROM Resultado_Comision
+                WHERE id_comision IN (
+                    SELECT id_comision FROM Comision WHERE id_periodo = ?
+                )
+            """, (id_periodo,))
+            cursor.execute("DELETE FROM Comision WHERE id_periodo = ?", (id_periodo,))
+            cursor.execute("DELETE FROM Periodo WHERE id_periodo = ?", (id_periodo,))
+            msg = f"Período '{label}' eliminado con éxito."
+
+        conn.commit()
+        cursor.execute("PRAGMA foreign_keys = ON;")
+        conn.close()
+        return {"message": msg, "id_periodo": id_periodo}
+
+    except HTTPException:
+        conn.close()
+        raise
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Error al eliminar: {str(e)}")
