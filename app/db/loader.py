@@ -1,33 +1,33 @@
-﻿"""
+"""
 loader.py
 =========
-Responsabilidad: tomar el dict jer├írquico producido por ExcelTransformer y
+Responsabilidad: tomar el dict jerárquico producido por ExcelTransformer y
 persistirlo en la DB SQLite siguiendo el DER de HurData.
 
-Funci├│n principal:
+Función principal:
     cargar_reporte(datos: dict) -> dict
 
 El insert sigue el orden del DER para respetar las FK:
-    1. Modalidad    (cat├ílogo)
-    2. Estado       (cat├ílogo)
-    3. Carrera      (dimensi├│n)
-    4. Materia      (dimensi├│n)
-    5. Carrera_Materia (relaci├│n)
-    6. Periodo      (dimensi├│n temporal)
-    7. Comision     (tabla de hechos ÔÇö grupo; ├║nica por per├¡odo + carrera + materia + n├║mero)
-    8. Resultado_Comision (tabla de hechos ÔÇö detalle)
+    1. Modalidad    (catálogo)
+    2. Estado       (catálogo)
+    3. Carrera      (dimensión)
+    4. Materia      (dimensión)
+    5. Carrera_Materia (relación)
+    6. Periodo      (dimensión temporal)
+    7. Comision     (tabla de hechos — grupo; única por período + carrera + materia + número)
+    8. Resultado_Comision (tabla de hechos — detalle)
 
 Estrategia de duplicados:
     Las dimensiones (Modalidad, Estado, Carrera, Materia, Periodo) usan
     INSERT OR IGNORE + SELECT para resolver el ID, de modo que cargar el mismo
     Excel dos veces no duplica datos.
-    Las comisiones de una carrera en un per├¡odo se REEMPLAZAN al recargar: se
-    borran las de esa carrera + per├¡odo y se vuelven a cargar (sus resultados se
-    borran en cascada). As├¡ un Excel corregido no deja datos viejos, y las dem├ís
-    carreras del mismo per├¡odo no se tocan.
+    Las comisiones de una carrera en un período se REEMPLAZAN al recargar: se
+    borran las de esa carrera + período y se vuelven a cargar (sus resultados se
+    borran en cascada). Así un Excel corregido no deja datos viejos, y las demás
+    carreras del mismo período no se tocan.
 
-Validaci├│n:
-    Si el Excel no trae los metadatos m├¡nimos (a├▒o, cuatrimestre, carrera) se
+Validación:
+    Si el Excel no trae los metadatos mínimos (año, cuatrimestre, carrera) se
     lanza ValueError: NO se inventan valores por defecto.
 """
 
@@ -37,16 +37,16 @@ from app.db.connection import get_connection
 
 
 # ---------------------------------------------------------------------------
-# Helpers privados: upsert de cat├ílogos y dimensiones
+# Helpers privados: upsert de catálogos y dimensiones
 # ---------------------------------------------------------------------------
 
 def _get_or_create(conn: sqlite3.Connection, tabla: str, campo: str, valor: str) -> int:
     """
-    Inserta el valor si no existe y devuelve su id en la tabla de cat├ílogo.
+    Inserta el valor si no existe y devuelve su id en la tabla de catálogo.
     Funciona para tablas simples con una sola columna significativa (Modalidad, Estado).
 
     Args:
-        conn:   conexi├│n activa
+        conn:   conexión activa
         tabla:  nombre de la tabla ('Modalidad', 'Estado')
         campo:  nombre de la columna de texto ('nombre')
         valor:  string a insertar/buscar
@@ -64,7 +64,7 @@ def _get_or_create(conn: sqlite3.Connection, tabla: str, campo: str, valor: str)
 
 
 def _get_or_create_carrera(conn: sqlite3.Connection, codigo: str, nombre: str) -> int:
-    """Upsert de Carrera por c├│digo. Devuelve id_carrera."""
+    """Upsert de Carrera por código. Devuelve id_carrera."""
     conn.execute(
         "INSERT OR IGNORE INTO Carrera (codigo, nombre) VALUES (?, ?)",
         (codigo, nombre)
@@ -77,15 +77,15 @@ def _get_or_create_carrera(conn: sqlite3.Connection, codigo: str, nombre: str) -
 
 def _get_or_create_materia(conn: sqlite3.Connection, codigo: str, nombre: str) -> int:
     """
-    Upsert de Materia por c├│digo.
-    Si la materia ya existe con distinto nombre (correcci├│n), actualiza el nombre.
+    Upsert de Materia por código.
+    Si la materia ya existe con distinto nombre (corrección), actualiza el nombre.
     Devuelve id_materia.
     """
     conn.execute(
         "INSERT OR IGNORE INTO Materia (codigo, nombre) VALUES (?, ?)",
         (codigo, nombre)
     )
-    # Si ya exist├¡a con otro nombre, actualizamos (puede pasar si corrigen el Excel)
+    # Si ya existía con otro nombre, actualizamos (puede pasar si corrigen el Excel)
     conn.execute(
         "UPDATE Materia SET nombre = ? WHERE codigo = ? AND nombre != ?",
         (nombre, codigo, nombre)
@@ -110,7 +110,7 @@ def _get_or_create_periodo(conn: sqlite3.Connection, anio: int, cuatrimestre: st
 
 
 def _link_carrera_materia(conn: sqlite3.Connection, id_carrera: int, id_materia: int) -> None:
-    """Inserta la relaci├│n Carrera_Materia si no existe."""
+    """Inserta la relación Carrera_Materia si no existe."""
     conn.execute(
         "INSERT OR IGNORE INTO Carrera_Materia (id_carrera, id_materia) VALUES (?, ?)",
         (id_carrera, id_materia)
@@ -156,7 +156,7 @@ def _upsert_resultado(
 ) -> None:
     """
     Inserta o actualiza Resultado_Comision.
-    Si la misma comisi├│n+estado ya existe (recarga del mismo Excel), actualiza
+    Si la misma comisión+estado ya existe (recarga del mismo Excel), actualiza
     la cantidad para reflejar correcciones en el reporte original.
     """
     conn.execute(
@@ -171,15 +171,15 @@ def _upsert_resultado(
 
 
 # ---------------------------------------------------------------------------
-# Validaci├│n
+# Validación
 # ---------------------------------------------------------------------------
 
-# Metadatos m├¡nimos que debe traer el Excel para poder identificar la carga
-_CAMPOS_OBLIGATORIOS = ("a├▒o_academico", "cuatrimestre", "codigo_carrera", "nombre_carrera")
+# Metadatos mínimos que debe traer el Excel para poder identificar la carga
+_CAMPOS_OBLIGATORIOS = ("año_academico", "cuatrimestre", "codigo_carrera", "nombre_carrera")
 
 
 def _validar_metadatos(datos: dict) -> None:
-    """Falla con ValueError si el Excel no trae lo m├¡nimo. NO inventamos valores."""
+    """Falla con ValueError si el Excel no trae lo mínimo. NO inventamos valores."""
     faltan = [c for c in _CAMPOS_OBLIGATORIOS if not datos.get(c)]
     if faltan:
         raise ValueError(
@@ -190,17 +190,17 @@ def _validar_metadatos(datos: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Funci├│n p├║blica principal
+# Función pública principal
 # ---------------------------------------------------------------------------
 
 def cargar_reporte(datos: dict) -> dict:
     """
-    Carga el dict jer├írquico producido por ExcelTransformer en la DB SQLite.
+    Carga el dict jerárquico producido por ExcelTransformer en la DB SQLite.
 
     Args:
         datos: dict con estructura:
             {
-                "a├▒o_academico": int,
+                "año_academico": int,
                 "cuatrimestre":  str,
                 "codigo_carrera": str,
                 "nombre_carrera": str,
@@ -245,14 +245,14 @@ def cargar_reporte(datos: dict) -> dict:
 
     try:
         # ------------------------------------------------------------------
-        # 1. Dimensi├│n temporal
+        # 1. Dimensión temporal
         # ------------------------------------------------------------------
-        anio = datos["a├▒o_academico"]
+        anio = datos["año_academico"]
         cuatrimestre = datos["cuatrimestre"]
         id_periodo = _get_or_create_periodo(conn, anio, cuatrimestre)
 
         # ------------------------------------------------------------------
-        # 2. Dimensi├│n acad├®mica ÔÇö Carrera
+        # 2. Dimensión académica — Carrera
         # ------------------------------------------------------------------
         id_carrera = _get_or_create_carrera(
             conn,
@@ -260,7 +260,7 @@ def cargar_reporte(datos: dict) -> dict:
             datos["nombre_carrera"]
         )
 
-        # Recargar un Excel REEMPLAZA lo que hab├¡a de esa carrera en ese per├¡odo
+        # Recargar un Excel REEMPLAZA lo que había de esa carrera en ese período
         # (borra comisiones; los resultados se van en cascada). No toca otras carreras.
         conn.execute(
             "DELETE FROM Comision WHERE id_periodo = ? AND id_carrera = ?",
@@ -275,10 +275,10 @@ def cargar_reporte(datos: dict) -> dict:
             codigo_materia = actividad.get("codigo_materia")
             nombre_materia = actividad.get("nombre")
 
-            # Saltar actividades sin c├│digo o nombre. No se pierden en silencio:
+            # Saltar actividades sin código o nombre. No se pierden en silencio:
             # quedan listadas en 'actividades_omitidas' del resumen.
             if not codigo_materia or not nombre_materia:
-                print(f"[LOADER] ÔÜá´©Å  Actividad sin c├│digo o nombre, se omite: {actividad}")
+                print(f"[LOADER] ⚠️  Actividad sin código o nombre, se omite: {actividad}")
                 omitidas.append(actividad.get("nombre") or "(sin nombre)")
                 continue
 
@@ -296,7 +296,7 @@ def cargar_reporte(datos: dict) -> dict:
                 nombre_completo = comision.get("nombre_completo", "")
 
                 if numero is None:
-                    print(f"[LOADER] ÔÜá´©Å  Comisi├│n sin n├║mero en '{nombre_materia}', se omite.")
+                    print(f"[LOADER] ⚠️  Comisión sin número en '{nombre_materia}', se omite.")
                     continue
 
                 id_comision = _get_or_create_comision(
@@ -305,7 +305,7 @@ def cargar_reporte(datos: dict) -> dict:
                 total_comisiones += 1
 
                 # ----------------------------------------------------------
-                # 5. Iterar estados ÔåÆ Resultado_Comision
+                # 5. Iterar estados → Resultado_Comision
                 # ----------------------------------------------------------
                 for estado_data in comision.get("estados", []):
                     estado_nombre = estado_data.get("estado")
@@ -319,15 +319,15 @@ def cargar_reporte(datos: dict) -> dict:
                     total_resultados += 1
 
         conn.commit()
-        print(f"[LOADER] Ô£à Carga completada ÔÇö {len(datos.get('actividades', [])) - len(omitidas)} materias, "
+        print(f"[LOADER] ✅ Carga completada — {len(datos.get('actividades', [])) - len(omitidas)} materias, "
               f"{total_comisiones} comisiones, {total_resultados} resultados.")
 
     except Exception as e:
         conn.rollback()
-        print(f"[LOADER] ÔØî Error durante la carga, se hizo rollback: {e}")
+        print(f"[LOADER] ❌ Error durante la carga, se hizo rollback: {e}")
         raise
     finally:
-        conn.close()  # la conexi├│n ya no es compartida: la cierra quien la abre
+        conn.close()  # la conexión ya no es compartida: la cierra quien la abre
 
     return {
         "periodo": f"{anio} - {cuatrimestre}",

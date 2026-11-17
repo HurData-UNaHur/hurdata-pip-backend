@@ -1,4 +1,4 @@
-﻿"""
+"""
 main.py
 =======
 Punto de entrada de la API REST de HurData PIP.
@@ -6,15 +6,15 @@ Punto de entrada de la API REST de HurData PIP.
 Para correr en desarrollo:
     uvicorn app.api.main:app --reload
 
-Endpoints disponibles en esta versi├│n:
-    GET    /health                      ÔåÆ estado de la API y la DB
-    GET    /api/periodos                ÔåÆ per├¡odos cargados
-    GET    /api/carreras                ÔåÆ carreras con datos (filtrable por per├¡odo)
-    GET    /api/periodos-carreras       ÔåÆ cada combinaci├│n per├¡odo + carrera cargada
-    GET    /api/datos                   ÔåÆ actividades, comisiones y resultados
-    POST   /upload                      ÔåÆ carga un Excel del SIU y ejecuta el pipeline ETL
-    DELETE /api/periodos/{id}           ÔåÆ borra un per├¡odo (o una carrera dentro de ├®l)
-    DELETE /api/limpiar-db              ÔåÆ vac├¡a la base de datos
+Endpoints disponibles en esta versión:
+    GET    /health                      → estado de la API y la DB
+    GET    /api/periodos                → períodos cargados
+    GET    /api/carreras                → carreras con datos (filtrable por período)
+    GET    /api/periodos-carreras       → cada combinación período + carrera cargada
+    GET    /api/datos                   → actividades, comisiones y resultados
+    POST   /upload                      → carga un Excel del SIU y ejecuta el pipeline ETL
+    DELETE /api/periodos/{id}           → borra un período (o una carrera dentro de él)
+    DELETE /api/limpiar-db              → vacía la base de datos
 
 Los endpoints viven en app/api/routers/ (consultas.py y admin.py);
 este archivo solo arma la app y los enchufa.
@@ -53,20 +53,20 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="HurData PIP ÔÇö API",
-    description="Backend anal├¡tico de gesti├│n acad├®mica para la UNAHUR.",
+    title="HurData PIP — API",
+    description="Backend analítico de gestión académica para la UNAHUR.",
     version="0.2.0",
     lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
-# CORS ÔÇö permite peticiones desde el frontend (or├¡genes definidos en config)
+# CORS — permite peticiones desde el frontend (orígenes definidos en config)
 # ---------------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,                     # ej: Vite dev server (5173)
-    allow_methods=["GET", "POST", "DELETE"],               # solo los m├®todos que usamos
+    allow_methods=["GET", "POST", "DELETE"],               # solo los métodos que usamos
     allow_headers=["Content-Type", "X-API-Key"],           # X-API-Key: ver app/api/deps.py
 )
 
@@ -74,8 +74,8 @@ app.add_middleware(
 # Routers: cada uno agrupa endpoints relacionados
 # ---------------------------------------------------------------------------
 
-app.include_router(consultas.router)   # GET  ÔåÆ lectura (p├║blicos)
-app.include_router(admin.router)       # POST/DELETE ÔåÆ modifican datos (protegidos)
+app.include_router(consultas.router)   # GET  → lectura (públicos)
+app.include_router(admin.router)       # POST/DELETE → modifican datos (protegidos)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ app.include_router(admin.router)       # POST/DELETE ÔåÆ modifican datos (pro
 @app.get("/health", tags=["Sistema"])
 def health_check(conn=Depends(get_db)):
     """
-    Verifica que la API y la DB est├®n operativas.
+    Verifica que la API y la DB estén operativas.
 
     Retorna:
         - status: "ok"

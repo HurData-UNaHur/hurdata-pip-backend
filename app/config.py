@@ -16,12 +16,13 @@ class Config:
         "estadisticas de fin de cursada.xlsx"
     )
 
-    # Ruta absoluta al archivo SQLite.
-    # Se puede sobreescribir con DB_PATH en .env (útil para tests o producción).
-    DB_PATH: str = os.getenv(
-        "DB_PATH",
-        str(_BASE_DIR / "hurdata.db")
-    )
+    # Nombre del archivo SQLite. Siempre se crea en la raíz del proyecto,
+    # nunca en una ruta arbitraria. DB_PATH en .env puede definir solo el nombre
+    # del archivo (ej. "hurdata.db"); rutas con separadores se ignoran por seguridad.
+    _db_name_raw: str = os.getenv("DB_PATH", "") or "hurdata.db"
+    # Tomar solo el nombre de archivo, descartar cualquier componente de ruta
+    _db_name: str = Path(_db_name_raw).name or "hurdata.db"
+    DB_PATH: str = str(_BASE_DIR / _db_name)
 
     # Orígenes del frontend que pueden llamar a la API (CORS), separados por coma.
     # Por defecto, el servidor de desarrollo de Vite. En producción, definirlo en .env.
