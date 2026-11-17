@@ -24,8 +24,12 @@ def init_db() -> None:
     sql = schema_path.read_text(encoding="utf-8")
 
     conn = get_connection()
-    conn.executescript(sql)
-    conn.commit()
+    try:
+        conn.execute("PRAGMA journal_mode = WAL") 
+        conn.executescript(sql)
+        conn.commit()
+    finally:
+        conn.close()  
 
     print("[DB] Esquema inicializado correctamente.")
 
@@ -34,8 +38,11 @@ if __name__ == "__main__":
     init_db()
     print("[DB] Tablas disponibles:")
     conn = get_connection()
-    tablas = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).fetchall()
-    for t in tablas:
-        print(f"  • {t['name']}")
+    try:
+        tablas = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        for t in tablas:
+            print(f"  • {t['name']}")
+    finally:
+        conn.close()

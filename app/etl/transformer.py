@@ -15,10 +15,10 @@ Campos que se extraen y su destino en la DB (según DER HurData_DB):
 │ Fila "Período Lectivo" (col 2)           │ Cuatrimestre.Nombre_Cuatrimestre      │
 │ Fila "Propuesta"      (col 2)            │ Carrera.Nombre_Carrera + Codigo       │
 │ "Actividad <nombre>"  (col 0)            │ Materia.Nombre_Materia                │
-│ Código entre paréntesis ej. (004)        │ Materia.Codigo_Materia  (TEXT)        │
-│ "Comisión (XXX)-COMISIÓN N-MODALIDAD"   │                                       │
+│ Código de materia (ej. 004, AU_13)       │ Materia.Codigo_Materia  (TEXT)        │
+│ "Comisión XXX-COMISIÓN N-MODALIDAD"      │                                       │
 │   └─ número N                            │ Comision.Numero_Comision  (INTEGER)   │
-│   └─ VIRTUAL / PRESENCIAL / COMBINADA   │ Modalidad.Nombre_Modalidad            │
+│   └─ VIRTUAL / PRESENCIAL / COMBINADA    │ Modalidad.Nombre_Modalidad            │
 │ Estado (Libre / Promocionó / etc.)       │ Estado.Nombre_Estado                  │
 │ Total Alumnos                            │ Resultado_Comision.Cantidad_Alumnos   │
 │ Porcentaje sobre el total                │ NO se persiste — calculable en query  │
@@ -91,8 +91,10 @@ class ExcelTransformer:
         """
         Descompone el string de comisión en sus partes constitutivas.
 
-        Formato esperado: 'Comisión (CODIGO)-COMISIÓN N-MODALIDAD[...]'
-        Ejemplo:          'Comisión (004)-COMISIÓN 1-COMBINADA'
+         cabecera en varios formatos; todos se aceptan:
+            'Comisión (004)-COMISIÓN 1-COMBINADA'            código entre paréntesis
+            'Comisión AU_48-COMISIÓN 1-VIRTUAL'              código sin paréntesis
+            'Comisión (AU_40) COMISIÓN 1 - VIRTUAL'          sin guión tras el código
 
         Retorna un dict con:
             codigo_materia  → str  ej: '004', 'AU_13'   → Materia.Codigo_Materia
@@ -102,9 +104,11 @@ class ExcelTransformer:
         """
         valor = str(valor).strip()
 
-        # Extraer código de materia entre paréntesis: (004) o (AU_13)
-        match_codigo = re.search(r'\(([^)]+)\)', valor)
-        codigo_materia = match_codigo.group(1) if match_codigo else None
+        # Cabecera completa: captura el código de materia (grupo 1, con o sin paréntesis)
+        # y el resto del texto (grupo 2), separados por guión y/o espacios.
+        patron_cabecera = r'\s*Comisi[óo]n\s+\(?([^)\s\-]+)\)?[\s\-]+(.+)$'
+        match_cab = re.match(patron_cabecera, valor, re.IGNORECASE)
+        codigo_materia = match_cab.group(1) if match_cab else None
 
         # Extraer número de comisión: 'COMISIÓN 5' → 5
         match_numero = re.search(r'COMISI[ÓO]N\s+(\d+)', valor, re.IGNORECASE)
@@ -120,9 +124,8 @@ class ExcelTransformer:
                 modalidad = token.capitalize()  # 'Virtual', 'Presencial', 'Combinada'
                 break
 
-        # Nombre legible para mostrar en UI: todo lo que viene después del ')- '
-        match_nombre = re.search(r'\)-(.+)$', valor)
-        nombre_completo = match_nombre.group(1).strip() if match_nombre else valor
+        # Nombre legible para mostrar en UI: todo lo que viene después del código
+        nombre_completo = match_cab.group(2).strip() if match_cab else valor
 
         return {
             "codigo_materia": codigo_materia,

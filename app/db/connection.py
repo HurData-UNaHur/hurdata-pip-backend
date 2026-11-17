@@ -1,10 +1,10 @@
 """
 connection.py
 =============
-Responsabilidad: proveer una conexión SQLite reutilizable para toda la app.
+Responsabilidad: proveer conexiones SQLite para toda la app.
 
-Patrón usado: módulo singleton — la conexión se crea una sola vez al importar
-y se reutiliza en todas las llamadas a get_connection().
+Patrón usado: una conexión NUEVA por cada llamada a get_connection(). Cada request de FastAPI trabaje con su propia conexión y la
+cierre al terminar, sin compartir transacciones con otros requests.
 
 Configuración:
     La ruta al archivo .db se lee de config.DB_PATH.
@@ -14,7 +14,10 @@ Uso típico:
     from app.db.connection import get_connection
 
     conn = get_connection()
-    rows = conn.execute("SELECT * FROM Carrera").fetchall()
+    try:
+        rows = conn.execute("SELECT * FROM Carrera").fetchall()
+    finally:
+        conn.close()   # quien abre la conexión es responsable de cerrarla
 """
 
 import sqlite3
@@ -22,38 +25,24 @@ from pathlib import Path
 
 from app.config import config
 
-_connection: sqlite3.Connection | None = None
-
 
 def get_connection() -> sqlite3.Connection:
     """
-    Devuelve la conexión SQLite singleton.
+    Abre y devuelve una conexión SQLite NUEVA (ya no es singleton).
 
-    La primera llamada abre el archivo y configura:
+    Cada conexión se configura con:
         - row_factory = sqlite3.Row  → acceso a columnas por nombre (row["campo"])
         - PRAGMA foreign_keys = ON   → integridad referencial activada
-        - PRAGMA journal_mode = WAL  → mejor concurrencia para lecturas simultáneas
+                                       (hay que activarlo en CADA conexión)
+
     """
-    global _connection
+    db_path = Path(config.DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if _connection is None:
-        db_path = Path(config.DB_PATH)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        _connection = sqlite3.connect(str(db_path), check_same_thread=False)
-        _connection.row_factory = sqlite3.Row
-        _connection.execute("PRAGMA foreign_keys = ON")
-        _connection.execute("PRAGMA journal_mode = WAL")
-
-        print(f"[DB] Conexión abierta: {db_path}")
-
-    return _connection
-
-
-def close_connection() -> None:
-    """Cierra la conexión si está abierta. Útil en tests y shutdown de FastAPI."""
-    global _connection
-    if _connection is not None:
-        _connection.close()
-        _connection = None
-        print("[DB] Conexión cerrada.")
+    # check_same_thread=False: FastAPI puede abrir la conexión en un thread del
+    # pool y usarla en otro. Es seguro porque cada conexión la usa un solo request.
+    # timeout=10: si la base está ocupada, espera hasta 10 s antes de fallar.
+    conn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")  # hay que activarlo en CADA conexión
+    return conn

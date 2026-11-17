@@ -1,0 +1,91 @@
+"""
+schemas.py
+==========
+Responsabilidad: definir la FORMA exacta del JSON que devuelve la API.
+
+Son el contrato con el frontend (ver src/services/api.js y src/App.jsx):
+    • FastAPI valida que cada respuesta cumpla el modelo antes de enviarla.
+    • Swagger (/docs) los muestra como documentación de cada endpoint.
+Si se cambia un nombre de campo acá, hay que cambiarlo también en el frontend.
+"""
+
+from pydantic import BaseModel
+
+
+# ---------------------------------------------------------------------------
+# GET /api/periodos
+# ---------------------------------------------------------------------------
+
+class PeriodoOut(BaseModel):
+    id_periodo: int
+    anio: int
+    cuatrimestre: str       # ej: 'PRIMER CUATRIMESTRE'
+    label: str              # ej: '2022 - PRIMER CUATRIMESTRE' (lo que muestra el selector)
+
+
+class PeriodosOut(BaseModel):
+    periodos: list[PeriodoOut]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/carreras
+# ---------------------------------------------------------------------------
+
+class CarreraOut(BaseModel):
+    id: int
+    nombre: str
+
+
+class CarrerasOut(BaseModel):
+    carreras: list[CarreraOut]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/periodos-carreras
+# ---------------------------------------------------------------------------
+
+class PeriodoCarreraOut(BaseModel):
+    id_periodo: int
+    id_carrera: int
+    label: str              # label del período
+    nombre_carrera: str
+
+
+class PeriodosCarrerasOut(BaseModel):
+    periodos: list[PeriodoCarreraOut]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/datos  (de adentro hacia afuera: estado → comisión → actividad)
+# ---------------------------------------------------------------------------
+
+class EstadoOut(BaseModel):
+    estado: str             # ej: 'Libre', 'Promocionó', 'Regular'
+    total_alumnos: int
+
+
+class ComisionOut(BaseModel):
+    numero_comision: int
+    modalidad: str          # 'Virtual' | 'Presencial' | 'Combinada'
+    nombre_completo: str    # ej: 'COMISIÓN 1-VIRTUAL'
+    estados: list[EstadoOut]
+
+
+class ActividadOut(BaseModel):
+    nombre: str
+    codigo_materia: str     # ej: '004', 'AU_13'
+    comisiones: list[ComisionOut]
+
+
+class DatosOut(BaseModel):
+    nombre_carrera: str
+    carreras_disponibles: list[str]
+    actividades: list[ActividadOut]
+
+
+# ---------------------------------------------------------------------------
+# Respuestas simples (DELETE)
+# ---------------------------------------------------------------------------
+
+class MensajeOut(BaseModel):
+    message: str

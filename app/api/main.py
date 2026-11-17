@@ -7,21 +7,32 @@ Para correr en desarrollo:
     uvicorn app.api.main:app --reload
 
 Endpoints disponibles en esta versión:
-    GET  /health        → estado de la API y la DB
-    POST /upload        → carga un Excel del SIU y ejecuta el pipeline ETL
+    GET    /health                      → estado de la API y la DB
+    GET    /api/periodos                → períodos cargados
+    GET    /api/carreras                → carreras con datos (filtrable por período)
+    GET    /api/periodos-carreras       → cada combinación período + carrera cargada
+    GET    /api/datos                   → actividades, comisiones y resultados
+    POST   /upload                      → carga un Excel del SIU y ejecuta el pipeline ETL
+    DELETE /api/periodos/{id}           → borra un período (o una carrera dentro de él)
+    DELETE /api/limpiar-db              → vacía la base de datos
+
+Los endpoints viven en app/api/routers/ (consultas.py y admin.py);
+este archivo solo arma la app y los enchufa.
 """
 
+import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
-import shutil
-import tempfile
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.deps import get_db
+from app.api.routers import admin, consultas
+from app.config import config
 from app.db.init_db import init_db
-from app.db.connection import get_connection
-from app.etl.pipeline import ejecutar_etl
+
+# Muestra en consola los logs (incluidos los errores internos del ETL)
+logging.basicConfig(level=logging.INFO)
 
 
 # ---------------------------------------------------------------------------
@@ -44,32 +55,35 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HurData PIP — API",
     description="Backend analítico de gestión académica para la UNAHUR.",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
-# CORS — permite peticiones desde el frontend en desarrollo (Vite: 5173)
+# CORS — permite peticiones desde el frontend (orígenes definidos en config)
 # ---------------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev server
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=config.CORS_ORIGINS,                     # ej: Vite dev server (5173)
+    allow_methods=["GET", "POST", "DELETE"],               # solo los métodos que usamos
+    allow_headers=["Content-Type", "X-API-Key"],           # X-API-Key: ver app/api/deps.py
 )
+
+# ---------------------------------------------------------------------------
+# Routers: cada uno agrupa endpoints relacionados
+# ---------------------------------------------------------------------------
+
+app.include_router(consultas.router)   # GET  → lectura (públicos)
+app.include_router(admin.router)       # POST/DELETE → modifican datos (protegidos)
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints propios de la app
 # ---------------------------------------------------------------------------
 
 @app.get("/health", tags=["Sistema"])
-def health_check():
+def health_check(conn=Depends(get_db)):
     """
     Verifica que la API y la DB estén operativas.
 
@@ -77,55 +91,10 @@ def health_check():
         - status: "ok"
         - db_tablas: lista de tablas presentes en la DB
     """
-    conn = get_connection()
     tablas = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     return {
         "status": "ok",
         "db_tablas": [t["name"] for t in tablas],
-    }
-
-
-@app.post("/upload", tags=["ETL"], status_code=201)
-async def upload_excel(archivo: UploadFile = File(...)):
-    """
-    Recibe un archivo .xlsx del SIU Guaraní, ejecuta el pipeline ETL completo
-    (Extract → Transform → Load) y persiste los datos en la DB.
-
-    Args:
-        archivo: archivo .xlsx enviado como form-data (campo 'archivo').
-
-    Returns:
-        Resumen de la carga con cantidades de materias, comisiones y resultados.
-
-    Errors:
-        400: si el archivo no es .xlsx
-        500: si el pipeline falla
-    """
-    # Validar extensión
-    if not archivo.filename or not archivo.filename.lower().endswith(".xlsx"):
-        raise HTTPException(
-            status_code=400,
-            detail="Solo se aceptan archivos .xlsx del SIU Guaraní."
-        )
-
-    # Guardar en un archivo temporal para que el extractor lo pueda leer
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-        shutil.copyfileobj(archivo.file, tmp)
-        ruta_tmp = Path(tmp.name)
-
-    try:
-        resumen = ejecutar_etl(ruta_excel=ruta_tmp)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error en el pipeline ETL: {str(e)}"
-        )
-    finally:
-        ruta_tmp.unlink(missing_ok=True)  # limpiar archivo temporal
-
-    return {
-        "message": "Archivo procesado correctamente.",
-        "resumen": resumen,
     }
