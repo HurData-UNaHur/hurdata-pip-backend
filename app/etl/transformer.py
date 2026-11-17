@@ -16,9 +16,9 @@ Campos que se extraen y su destino en la DB (según DER HurData_DB):
 │ Fila "Propuesta"      (col 2)            │ Carrera.Nombre_Carrera + Codigo       │
 │ "Actividad <nombre>"  (col 0)            │ Materia.Nombre_Materia                │
 │ Código entre paréntesis ej. (004)        │ Materia.Codigo_Materia  (TEXT)        │
-│ "Comisión (XXX)-COMISIÓN N-MODALIDAD"   │                                       │
+│ "Comisión (XXX)-COMISIÓN N-MODALIDAD"    │                                       │
 │   └─ número N                            │ Comision.Numero_Comision  (INTEGER)   │
-│   └─ VIRTUAL / PRESENCIAL / COMBINADA   │ Modalidad.Nombre_Modalidad            │
+│   └─ VIRTUAL / PRESENCIAL / COMBINADA    │ Modalidad.Nombre_Modalidad            │
 │ Estado (Libre / Promocionó / etc.)       │ Estado.Nombre_Estado                  │
 │ Total Alumnos                            │ Resultado_Comision.Cantidad_Alumnos   │
 │ Porcentaje sobre el total                │ NO se persiste — calculable en query  │
@@ -138,29 +138,53 @@ class ExcelTransformer:
         Ejemplo: 'PRIMER CUATRIMESTRE 2022'
         Retorna:
             cuatrimestre → 'PRIMER CUATRIMESTRE'   → Cuatrimestre.Nombre_Cuatrimestre
-            anio         → 2022                     → Periodo.Anio
+            anio         → 2022                    → Periodo.Anio
         """
         valor = str(valor).strip()
         match = re.search(r'(\d{4})', valor)
         anio = int(match.group(1)) if match else None
-        cuatrimestre = re.sub(r'\d{4}', '', valor).strip() if anio else valor
+        
+        val_upper = valor.upper()
+        if re.search(r'(SEGUNDO|2\s*C|2º|2°)', val_upper):
+            cuatrimestre = "SEGUNDO CUATRIMESTRE"
+        elif re.search(r'(PRIMER|1\s*C|1º|1°)', val_upper):
+            cuatrimestre = "PRIMER CUATRIMESTRE"
+        else:
+            cuatrimestre = re.sub(r'\d{4}', '', valor).strip() if anio else valor
+
         return {"cuatrimestre": cuatrimestre, "anio": anio}
 
     def _parsear_propuesta(self, valor: str) -> dict:
         """
-        Descompone el string de propuesta en código y nombre de carrera.
+        Limpia el string de propuesta eliminado prefijos del SIU Guaraní y códigos.
 
-        Ejemplo: '(023) Licenciatura en Informática'
+        Ejemplo input:  'Propuesta es igual a (085) Licenciatura en Kinesiología y Fisiatría'
         Retorna:
-            codigo_carrera  → '023'                         → (referencia futura)
-            nombre_carrera  → 'Licenciatura en Informática' → Carrera.Nombre_Carrera
+            codigo_carrera  → '085'
+            nombre_carrera  → 'Licenciatura en Kinesiología y Fisiatría'
         """
         valor = str(valor).strip()
-        match = re.match(r'\((\d+)\)\s*(.+)', valor)
-        if match:
-            return {"codigo_carrera": match.group(1), "nombre_carrera": match.group(2).strip()}
-        return {"codigo_carrera": None, "nombre_carrera": valor}
 
+        # 1. Extraer el código entre paréntesis si existe: (085)
+        match_codigo = re.search(r'\(([^)]+)\)', valor)
+        codigo_carrera = match_codigo.group(1).strip() if match_codigo else None
+
+        # 2. Limpiar prefijos conocidos del SIU ('Propuesta', 'es igual a', HTML)
+        limpio = re.sub(r'</?[^>]+>', '', valor)  # Quita tags HTML si existieran
+        limpio = re.sub(r'(?i)propuesta', '', limpio)
+        limpio = re.sub(r'(?i)es\s+igual\s+a', '', limpio)
+        limpio = re.sub(r'\([^)]+\)', '', limpio)  # Quita el paréntesis y su contenido (085)
+        
+        nombre_carrera = limpio.strip()
+
+        # Si tras limpiar queda vacío, fallback al valor original
+        if not nombre_carrera:
+            nombre_carrera = valor
+
+        return {
+            "codigo_carrera": codigo_carrera,
+            "nombre_carrera": nombre_carrera
+        }
     # -------------------------------------------------------------------------
     # Parseo de metadatos globales (primeras filas del Excel)
     # -------------------------------------------------------------------------
@@ -180,25 +204,35 @@ class ExcelTransformer:
             nombre_carrera  → str                    → Carrera.Nombre_Carrera
         """
         meta = {}
-        for _, row in df_raw.iterrows():
-            clave = str(row.iloc[0]).strip()
+        # Escanear las primeras 20 filas para encontrar las celdas de encabezado
+        for _, row in df_raw.iloc[:20].iterrows():
+            # Concatenar el contenido de la fila completa en un solo string de inspección
+            valores_fila = [str(v).strip() for v in row if pd.notna(v) and str(v).strip()]
+            texto_fila = " ".join(valores_fila)
 
-            if clave == "Año Académico":
-                meta["año_academico"] = int(str(row.iloc[2]).strip())
+            if not texto_fila:
+                continue
 
-            elif clave == "Período Lectivo":
-                periodo_parseado = self._parsear_periodo(str(row.iloc[2]).strip())
+            # 1. Extracción de Año Académico
+            if "AÑO ACADÉMICO" in texto_fila.upper() or "ANO ACADEMICO" in texto_fila.upper():
+                match = re.search(r'20\d{2}', texto_fila)
+                if match:
+                    meta["año_academico"] = int(match.group(0))
+
+            # 2. Extracción de Período Lectivo / Cuatrimestre
+            if "PERÍODO LECTIVO" in texto_fila.upper() or "PERIODO LECTIVO" in texto_fila.upper():
+                periodo_parseado = self._parsear_periodo(texto_fila)
                 meta["cuatrimestre"] = periodo_parseado["cuatrimestre"]
-                # año_academico ya lo tenemos de la fila anterior, pero por consistencia:
                 if "año_academico" not in meta and periodo_parseado["anio"]:
                     meta["año_academico"] = periodo_parseado["anio"]
 
-            elif clave == "Propuesta":
-                propuesta_parseada = self._parsear_propuesta(str(row.iloc[2]).strip())
+            # 3. Extracción de Propuesta / Carrera
+            if "PROPUESTA" in texto_fila.upper():
+                propuesta_parseada = self._parsear_propuesta(texto_fila)
                 meta.update(propuesta_parseada)
 
-            # Detener cuando lleguemos a la primera actividad
-            if self._es_fila_actividad(clave):
+            # Detener el escaneo de metadatos cuando empiece la lista de actividades
+            if any(self._es_fila_actividad(v) for v in valores_fila):
                 break
 
         return meta
