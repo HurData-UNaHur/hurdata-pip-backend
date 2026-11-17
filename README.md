@@ -6,7 +6,7 @@ Los reportes nativos del sistema (como las estadísticas de fin de cursada) suel
 * **Motor de Procesamiento Dinámico:** Limpia y normaliza automáticamente archivos Excel crudos del SIU, aislando los datos reales de los metadatos visuales.
 * **Arquitectura Modular Orientada a Objetos:** Código backend estructurado profesionalmente, separando responsabilidades para facilitar el testing, la escalabilidad y el trabajo ágil en equipo.
 * **Privacidad por Diseño (Privacy-First):** Configuración estricta de repositorios y entornos para garantizar que los archivos con datos sensibles de la universidad nunca se expongan en la nube pública.
-* **API RESTful:** Exposición de endpoints rápidos y documentados, optimizados para alimentar de forma directa los gráficos interactivos del frontend.
+* **API RESTful:** Endpoints rápidos y documentados, organizados por responsabilidad (consultas vs. administración), con autenticación por API key para las operaciones que modifican datos.
 
 ---
 
@@ -53,9 +53,20 @@ Crear un archivo `.env` en la raíz del proyecto (ya está excluido del reposito
 ```
 EXCEL_SIU_FILENAME=estadisticas de fin de cursada.xlsx
 DB_PATH=hurdata.db
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+ADMIN_API_KEY=
+MAX_UPLOAD_MB=10
 ```
 
-`DB_PATH` es opcional — si no se define, la base de datos se crea automáticamente como `hurdata.db` en la raíz del proyecto.
+| Variable | Descripción | Default |
+|---|---|---|
+| `EXCEL_SIU_FILENAME` | Nombre del Excel en `/files` para el pipeline por CLI | `estadisticas de fin de cursada.xlsx` |
+| `DB_PATH` | Ruta al archivo SQLite | `hurdata.db` (raíz del proyecto) |
+| `CORS_ORIGINS` | Orígenes permitidos para el frontend, separados por coma | `http://localhost:5173` |
+| `ADMIN_API_KEY` | Clave para los endpoints que modifican datos. Si se deja vacía, no se exige (modo desarrollo) | vacío |
+| `MAX_UPLOAD_MB` | Tamaño máximo de un Excel subido por `/upload` | `10` |
+
+> **Producción:** definir siempre `ADMIN_API_KEY` con un valor secreto. Sin ella, cualquiera puede subir o borrar datos.
 
 ## Gestión de Archivos Sensibles (Inputs)
 Los reportes crudos del SIU Guaraní (archivos `.xlsx`) **NO** deben subirse a GitHub por cuestiones de privacidad de datos.
@@ -78,12 +89,11 @@ Output esperado:
 [ETL] Procesando: estadisticas de fin de cursada.xlsx
 [EXTRACT] Leyendo datos desde: ...
 [TRANSFORM] 42 actividades y 113 comisiones procesadas.
-[DB] Conexión abierta: hurdata.db
 [DB] Esquema inicializado correctamente.
 [LOADER] ✅ Carga completada — 42 materias, 111 comisiones, 365 resultados.
 ```
 
-La DB puede recargarse con el mismo Excel sin duplicar datos (todas las inserciones usan upsert).
+La DB puede recargarse con el mismo Excel sin duplicar datos (las inserciones usan upsert).
 
 ### Levantar el servidor de desarrollo
 
@@ -95,10 +105,25 @@ El servidor queda disponible en `http://127.0.0.1:8000`.
 
 ### Endpoints disponibles
 
+#### Consultas (GET — públicos)
+
 | Método | URL | Descripción |
 |--------|-----|-------------|
-| `GET`  | `http://127.0.0.1:8000/health` | Estado de la API y lista de tablas en la DB |
-| `POST` | `http://127.0.0.1:8000/upload` | Carga un `.xlsx` del SIU y ejecuta el pipeline ETL |
+| `GET` | `/health` | Estado de la API y lista de tablas en la DB |
+| `GET` | `/api/periodos` | Períodos cargados, del más reciente al más antiguo |
+| `GET` | `/api/carreras?periodo=...` | Carreras con datos (filtrable por período) |
+| `GET` | `/api/periodos-carreras` | Cada combinación período + carrera cargada |
+| `GET` | `/api/datos?periodo=...&carrera=...` | Árbol actividades → comisiones → estados |
+
+#### Administración (POST / DELETE — requieren `X-API-Key` si está configurada)
+
+| Método | URL | Descripción |
+|--------|-----|-------------|
+| `POST` | `/upload` | Carga un `.xlsx` del SIU y ejecuta el pipeline ETL completo |
+| `DELETE` | `/api/periodos/{id}?id_carrera=...` | Borra un período (o solo una carrera dentro de él) |
+| `DELETE` | `/api/limpiar-db` | Vacía toda la base de datos |
+
+Los endpoints de administración esperan el header `X-API-Key: <valor>` cuando `ADMIN_API_KEY` está definida en `.env`.
 
 ### Documentación interactiva (Swagger)
 
@@ -106,6 +131,12 @@ FastAPI genera automáticamente una interfaz para explorar y probar los endpoint
 
 * **Swagger UI:** `http://127.0.0.1:8000/docs`
 * **ReDoc:** `http://127.0.0.1:8000/redoc`
+
+### Correr los tests
+
+```bash
+pytest tests/
+```
 
 ### Inspeccionar la base de datos
 
@@ -170,19 +201,38 @@ LIMIT 10;
 hurdata-pip-backend/
 ├── app/
 │   ├── api/
-│   │   └── main.py          # FastAPI: endpoints, CORS, lifespan
+│   │   ├── main.py              # FastAPI: app, CORS, lifespan, router de /health
+│   │   ├── deps.py              # Dependencias reutilizables: get_db, require_admin
+│   │   ├── schemas.py           # Modelos Pydantic de entrada/salida
+│   │   └── routers/
+│   │       ├── consultas.py     # GET /api/... → endpoints de lectura (públicos)
+│   │       └── admin.py         # POST /upload, DELETE /api/... → endpoints que modifican datos (protegidos)
 │   ├── db/
-│   │   ├── schema.sql        # Definición del DER (8 tablas)
-│   │   ├── connection.py     # Conexión SQLite singleton
-│   │   ├── init_db.py        # Inicializa tablas al arrancar
-│   │   └── loader.py         # Carga el dict del ETL a la DB
+│   │   ├── schema.sql           # Definición del DER (8 tablas)
+│   │   ├── connection.py        # get_connection(): una conexión SQLite nueva por request
+│   │   ├── init_db.py           # Inicializa tablas al arrancar
+│   │   ├── loader.py            # Persiste el dict del ETL en la DB
+│   │   └── queries.py           # Todo el SQL de lectura y borrado de la API
 │   ├── etl/
-│   │   ├── extractor.py      # Lee el Excel del SIU
-│   │   ├── transformer.py    # Convierte el DataFrame a dict jerárquico
-│   │   └── pipeline.py       # Orquesta Extract → Transform → Load
-│   └── config.py             # Variables de entorno (EXCEL_SIU_FILENAME, DB_PATH)
-├── files/                    # Carpeta para Excels del SIU (ignorada por git)
-├── .env                      # Variables locales (ignorado por git)
+│   │   ├── extractor.py         # Lee el Excel del SIU
+│   │   ├── transformer.py       # Convierte el DataFrame a dict jerárquico
+│   │   └── pipeline.py          # Orquesta Extract → Transform → Load
+│   └── config.py                # Variables de entorno (con valores por defecto)
+├── tests/
+│   ├── test_api.py              # Tests de los endpoints HTTP
+│   └── test_transformer.py      # Tests del transformer ETL
+├── files/                       # Carpeta para Excels del SIU (ignorada por git)
+├── .env                         # Variables locales (ignorado por git)
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Decisiones de arquitectura relevantes
+
+**Separación consultas / administración:** los endpoints de lectura (`routers/consultas.py`) son públicos y sin estado. Los que modifican datos (`routers/admin.py`) están agrupados en un router separado con autenticación por `X-API-Key`, lo que permite protegerlos en producción con un único punto de control.
+
+**Una conexión por request:** `get_connection()` abre una conexión nueva en cada llamada. `deps.get_db()` la entrega al endpoint y la cierra garantizadamente al terminar (incluso si hubo error), evitando los problemas de concurrencia del patrón singleton anterior.
+
+**SQL centralizado:** todo el SQL vive en `db/queries.py`. Los routers solo reciben parámetros HTTP, llaman a una función de queries y devuelven el resultado. Esto hace que las queries sean testeables sin levantar el servidor.
