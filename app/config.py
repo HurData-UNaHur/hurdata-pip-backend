@@ -23,5 +23,24 @@ class Config:
         str(_BASE_DIR / "hurdata.db")
     )
 
+    # Orígenes del frontend que pueden llamar a la API (CORS), separados por coma.
+    # Por defecto, el servidor de desarrollo de Vite. En producción, definirlo en .env.
+    CORS_ORIGINS: list[str] = [
+        o.strip()
+        for o in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173"
+        ).split(",")
+        if o.strip()
+    ]
+
+    # Clave para los endpoints que modifican datos (subir, borrar).
+    # Si se define en .env, esos endpoints exigen el header X-API-Key.
+    # Si queda vacía, no se exige (modo desarrollo). En producción, SIEMPRE definirla.
+    ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
+
+    # Tamaño máximo (en MB) de un Excel subido por /upload.
+    MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
+
 
 config = Config()

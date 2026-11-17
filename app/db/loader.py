@@ -1,191 +1,339 @@
-"""
+﻿"""
 loader.py
 =========
-Responsabilidad: recibir el diccionario estructurado entregado por ExcelTransformer
-e insertar/actualizar los datos en la base de datos SQLite (hurdata.db).
+Responsabilidad: tomar el dict jer├írquico producido por ExcelTransformer y
+persistirlo en la DB SQLite siguiendo el DER de HurData.
 
-Ubicación: app/db/loader.py
+Funci├│n principal:
+    cargar_reporte(datos: dict) -> dict
+
+El insert sigue el orden del DER para respetar las FK:
+    1. Modalidad    (cat├ílogo)
+    2. Estado       (cat├ílogo)
+    3. Carrera      (dimensi├│n)
+    4. Materia      (dimensi├│n)
+    5. Carrera_Materia (relaci├│n)
+    6. Periodo      (dimensi├│n temporal)
+    7. Comision     (tabla de hechos ÔÇö grupo; ├║nica por per├¡odo + carrera + materia + n├║mero)
+    8. Resultado_Comision (tabla de hechos ÔÇö detalle)
+
+Estrategia de duplicados:
+    Las dimensiones (Modalidad, Estado, Carrera, Materia, Periodo) usan
+    INSERT OR IGNORE + SELECT para resolver el ID, de modo que cargar el mismo
+    Excel dos veces no duplica datos.
+    Las comisiones de una carrera en un per├¡odo se REEMPLAZAN al recargar: se
+    borran las de esa carrera + per├¡odo y se vuelven a cargar (sus resultados se
+    borran en cascada). As├¡ un Excel corregido no deja datos viejos, y las dem├ís
+    carreras del mismo per├¡odo no se tocan.
+
+Validaci├│n:
+    Si el Excel no trae los metadatos m├¡nimos (a├▒o, cuatrimestre, carrera) se
+    lanza ValueError: NO se inventan valores por defecto.
 """
 
-import re
+import sqlite3
+
 from app.db.connection import get_connection
 
 
-def obtener_o_crear_id(cursor, tabla: str, col_id: str, col_nombre: str, valor: str) -> int:
-    """Helper para obtener el ID de una tabla de catálogo o crearlo si no existe."""
-    cursor.execute(f"SELECT {col_id} FROM {tabla} WHERE {col_nombre} = ?", (valor,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-    cursor.execute(f"INSERT INTO {tabla} ({col_nombre}) VALUES (?)", (valor,))
-    return cursor.lastrowid
+# ---------------------------------------------------------------------------
+# Helpers privados: upsert de cat├ílogos y dimensiones
+# ---------------------------------------------------------------------------
 
+def _get_or_create(conn: sqlite3.Connection, tabla: str, campo: str, valor: str) -> int:
+    """
+    Inserta el valor si no existe y devuelve su id en la tabla de cat├ílogo.
+    Funciona para tablas simples con una sola columna significativa (Modalidad, Estado).
+
+    Args:
+        conn:   conexi├│n activa
+        tabla:  nombre de la tabla ('Modalidad', 'Estado')
+        campo:  nombre de la columna de texto ('nombre')
+        valor:  string a insertar/buscar
+
+    Returns:
+        int: PK de la fila (nueva o existente)
+    """
+    conn.execute(
+        f"INSERT OR IGNORE INTO {tabla} ({campo}) VALUES (?)", (valor,)
+    )
+    row = conn.execute(
+        f"SELECT rowid FROM {tabla} WHERE {campo} = ?", (valor,)
+    ).fetchone()
+    return row[0]
+
+
+def _get_or_create_carrera(conn: sqlite3.Connection, codigo: str, nombre: str) -> int:
+    """Upsert de Carrera por c├│digo. Devuelve id_carrera."""
+    conn.execute(
+        "INSERT OR IGNORE INTO Carrera (codigo, nombre) VALUES (?, ?)",
+        (codigo, nombre)
+    )
+    row = conn.execute(
+        "SELECT id_carrera FROM Carrera WHERE codigo = ?", (codigo,)
+    ).fetchone()
+    return row["id_carrera"]
+
+
+def _get_or_create_materia(conn: sqlite3.Connection, codigo: str, nombre: str) -> int:
+    """
+    Upsert de Materia por c├│digo.
+    Si la materia ya existe con distinto nombre (correcci├│n), actualiza el nombre.
+    Devuelve id_materia.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO Materia (codigo, nombre) VALUES (?, ?)",
+        (codigo, nombre)
+    )
+    # Si ya exist├¡a con otro nombre, actualizamos (puede pasar si corrigen el Excel)
+    conn.execute(
+        "UPDATE Materia SET nombre = ? WHERE codigo = ? AND nombre != ?",
+        (nombre, codigo, nombre)
+    )
+    row = conn.execute(
+        "SELECT id_materia FROM Materia WHERE codigo = ?", (codigo,)
+    ).fetchone()
+    return row["id_materia"]
+
+
+def _get_or_create_periodo(conn: sqlite3.Connection, anio: int, cuatrimestre: str) -> int:
+    """Upsert de Periodo por (anio, cuatrimestre). Devuelve id_periodo."""
+    conn.execute(
+        "INSERT OR IGNORE INTO Periodo (anio, cuatrimestre) VALUES (?, ?)",
+        (anio, cuatrimestre)
+    )
+    row = conn.execute(
+        "SELECT id_periodo FROM Periodo WHERE anio = ? AND cuatrimestre = ?",
+        (anio, cuatrimestre)
+    ).fetchone()
+    return row["id_periodo"]
+
+
+def _link_carrera_materia(conn: sqlite3.Connection, id_carrera: int, id_materia: int) -> None:
+    """Inserta la relaci├│n Carrera_Materia si no existe."""
+    conn.execute(
+        "INSERT OR IGNORE INTO Carrera_Materia (id_carrera, id_materia) VALUES (?, ?)",
+        (id_carrera, id_materia)
+    )
+
+
+def _get_or_create_comision(
+    conn: sqlite3.Connection,
+    id_periodo: int,
+    id_carrera: int,
+    id_materia: int,
+    id_modalidad: int,
+    numero_comision: int,
+    nombre_completo: str,
+) -> int:
+    """
+    Upsert de Comision por (id_periodo, id_carrera, id_materia, numero_comision).
+    Devuelve id_comision.
+    """
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO Comision
+            (id_periodo, id_carrera, id_materia, id_modalidad, numero_comision, nombre_completo)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (id_periodo, id_carrera, id_materia, id_modalidad, numero_comision, nombre_completo),
+    )
+    row = conn.execute(
+        """
+        SELECT id_comision FROM Comision
+        WHERE id_periodo = ? AND id_carrera = ? AND id_materia = ? AND numero_comision = ?
+        """,
+        (id_periodo, id_carrera, id_materia, numero_comision),
+    ).fetchone()
+    return row["id_comision"]
+
+
+def _upsert_resultado(
+    conn: sqlite3.Connection,
+    id_comision: int,
+    id_estado: int,
+    cantidad_alumnos: int,
+) -> None:
+    """
+    Inserta o actualiza Resultado_Comision.
+    Si la misma comisi├│n+estado ya existe (recarga del mismo Excel), actualiza
+    la cantidad para reflejar correcciones en el reporte original.
+    """
+    conn.execute(
+        """
+        INSERT INTO Resultado_Comision (id_comision, id_estado, cantidad_alumnos)
+        VALUES (?, ?, ?)
+        ON CONFLICT(id_comision, id_estado)
+        DO UPDATE SET cantidad_alumnos = excluded.cantidad_alumnos
+        """,
+        (id_comision, id_estado, cantidad_alumnos)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validaci├│n
+# ---------------------------------------------------------------------------
+
+# Metadatos m├¡nimos que debe traer el Excel para poder identificar la carga
+_CAMPOS_OBLIGATORIOS = ("a├▒o_academico", "cuatrimestre", "codigo_carrera", "nombre_carrera")
+
+
+def _validar_metadatos(datos: dict) -> None:
+    """Falla con ValueError si el Excel no trae lo m├¡nimo. NO inventamos valores."""
+    faltan = [c for c in _CAMPOS_OBLIGATORIOS if not datos.get(c)]
+    if faltan:
+        raise ValueError(
+            "El Excel no tiene los datos esperados del SIU. Faltan: " + ", ".join(faltan)
+        )
+    if not datos.get("actividades"):
+        raise ValueError("El Excel no contiene actividades (materias) para cargar.")
+
+
+# ---------------------------------------------------------------------------
+# Funci├│n p├║blica principal
+# ---------------------------------------------------------------------------
 
 def cargar_reporte(datos: dict) -> dict:
     """
-    Persiste la estructura jerárquica devuelta por ExcelTransformer en SQLite.
-    Aplica limpieza selectiva por período y maneja restricciones UNIQUE de comisiones.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
+    Carga el dict jer├írquico producido por ExcelTransformer en la DB SQLite.
 
-    total_materias = 0
+    Args:
+        datos: dict con estructura:
+            {
+                "a├▒o_academico": int,
+                "cuatrimestre":  str,
+                "codigo_carrera": str,
+                "nombre_carrera": str,
+                "actividades": [
+                    {
+                        "nombre": str,
+                        "codigo_materia": str,
+                        "comisiones": [
+                            {
+                                "numero_comision": int,
+                                "modalidad": str,
+                                "nombre_completo": str,
+                                "estados": [
+                                    {"estado": str, "total_alumnos": int, ...}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+
+    Returns:
+        dict con un resumen de la carga:
+            {
+                "periodo": str,                    # ej: "2022 - PRIMER CUATRIMESTRE"
+                "nombre_carrera": str,
+                "actividades_omitidas": [str],     # nombres de actividades que NO se cargaron
+                "actividades_cargadas": int,
+                "comisiones_cargadas": int,
+                "resultados_cargados": int,
+            }
+
+    Raises:
+        ValueError: si faltan metadatos obligatorios o el Excel no tiene actividades.
+    """
+    _validar_metadatos(datos)
+    conn = get_connection()
+
+    # Contadores para el resumen final
     total_comisiones = 0
     total_resultados = 0
 
     try:
-        cursor.execute("PRAGMA foreign_keys = ON;")
+        # ------------------------------------------------------------------
+        # 1. Dimensi├│n temporal
+        # ------------------------------------------------------------------
+        anio = datos["a├▒o_academico"]
+        cuatrimestre = datos["cuatrimestre"]
+        id_periodo = _get_or_create_periodo(conn, anio, cuatrimestre)
 
-        # Metadatos del reporte
-        anio_raw = datos.get("año_academico") or datos.get("anio_academico") or datos.get("anio")
-        
-        try:
-            anio_academico = int(anio_raw)
-        except (ValueError, TypeError):
-            match = re.search(r'20\d{2}', str(datos))
-            anio_academico = int(match.group(0)) if match else 2021
+        # ------------------------------------------------------------------
+        # 2. Dimensi├│n acad├®mica ÔÇö Carrera
+        # ------------------------------------------------------------------
+        id_carrera = _get_or_create_carrera(
+            conn,
+            datos["codigo_carrera"],
+            datos["nombre_carrera"]
+        )
 
-        cuatrimestre_raw = str(datos.get("cuatrimestre") or "").upper().strip()
-        nombre_carrera = datos.get("nombre_carrera") or "Licenciatura en Informática"
+        # Recargar un Excel REEMPLAZA lo que hab├¡a de esa carrera en ese per├¡odo
+        # (borra comisiones; los resultados se van en cascada). No toca otras carreras.
+        conn.execute(
+            "DELETE FROM Comision WHERE id_periodo = ? AND id_carrera = ?",
+            (id_periodo, id_carrera),
+        )
 
-        # Limpieza de valores espurios de filtros SIU
-        if "IGUAL" in cuatrimestre_raw or "CONTIENE" in cuatrimestre_raw or len(cuatrimestre_raw) > 35:
-            cuatrimestre_raw = ""
-
-        # Normalización del cuatrimestre
-        if re.search(r'(SEGUNDO|2\s*C|2º|2°)', cuatrimestre_raw):
-            cuatrimestre = "SEGUNDO CUATRIMESTRE"
-        elif re.search(r'(PRIMER|1\s*C|1º|1°)', cuatrimestre_raw):
-            cuatrimestre = "PRIMER CUATRIMESTRE"
-        else:
-            cuatrimestre = cuatrimestre_raw if cuatrimestre_raw else "PRIMER CUATRIMESTRE"
-
-        label_periodo = f"{anio_academico} - {cuatrimestre}"
-
-        # 1. Resolver/Insertar Período
-        cursor.execute("""
-            SELECT id_periodo FROM Periodo WHERE anio = ? AND cuatrimestre = ?
-        """, (anio_academico, cuatrimestre))
-        row_p = cursor.fetchone()
-
-        if row_p:
-            id_periodo = row_p[0]
-        else:
-            cursor.execute("""
-                INSERT INTO Periodo (anio, cuatrimestre) VALUES (?, ?)
-            """, (anio_academico, cuatrimestre))
-            id_periodo = cursor.lastrowid
-
-        # 2. LIMPIEZA SELECTIVA: Eliminar únicamente los datos de las MATERIAS incluidas en este reporte
-        materias_reporte = [act.get("codigo_materia") or "000" for act in datos.get("actividades", [])]
-        
-        if materias_reporte:
-            placeholders = ",".join("?" for _ in materias_reporte)
-            
-            # Elimina resultados de comisiones de este período y de estas materias específicas
-            cursor.execute(f"""
-                DELETE FROM Resultado_Comision 
-                WHERE id_comision IN (
-                    SELECT c.id_comision 
-                    FROM Comision c
-                    JOIN Materia m ON c.id_materia = m.id_materia
-                    WHERE c.id_periodo = ? AND m.codigo IN ({placeholders})
-                );
-            """, [id_periodo] + materias_reporte)
-
-            # Elimina comisiones de este período y de estas materias específicas
-            cursor.execute(f"""
-                DELETE FROM Comision 
-                WHERE id_periodo = ? AND id_materia IN (
-                    SELECT id_materia FROM Materia WHERE codigo IN ({placeholders})
-                );
-            """, [id_periodo] + materias_reporte)
-
-        # 3. Resolver/Insertar Carrera
-        cursor.execute("SELECT id_carrera FROM Carrera WHERE nombre = ?", (nombre_carrera,))
-        row_c = cursor.fetchone()
-        
-        if row_c:
-            id_carrera = row_c[0]
-        else:
-            codigo_carrera = datos.get("codigo_carrera") or f"CAR-{abs(hash(nombre_carrera)) % 10000:04d}"
-            
-            cursor.execute("""
-                INSERT INTO Carrera (codigo, nombre) VALUES (?, ?)
-                ON CONFLICT(codigo) DO UPDATE SET nombre=excluded.nombre
-            """, (codigo_carrera, nombre_carrera))
-            
-            cursor.execute("SELECT id_carrera FROM Carrera WHERE nombre = ?", (nombre_carrera,))
-            id_carrera = cursor.fetchone()[0]
-
-        # 4. Recorrer e Insertar Materias, Comisiones y Resultados
+        # ------------------------------------------------------------------
+        # 3. Iterar actividades (Materias)
+        # ------------------------------------------------------------------
+        omitidas: list[str] = []  # actividades que no se pudieron cargar
         for actividad in datos.get("actividades", []):
+            codigo_materia = actividad.get("codigo_materia")
             nombre_materia = actividad.get("nombre")
-            codigo_materia = actividad.get("codigo_materia") or "000"
 
-            cursor.execute("SELECT id_materia FROM Materia WHERE codigo = ?", (codigo_materia,))
-            row_m = cursor.fetchone()
-            if row_m:
-                id_materia = row_m[0]
-            else:
-                cursor.execute("""
-                    INSERT INTO Materia (codigo, nombre) VALUES (?, ?)
-                """, (codigo_materia, nombre_materia))
-                id_materia = cursor.lastrowid
-                total_materias += 1
+            # Saltar actividades sin c├│digo o nombre. No se pierden en silencio:
+            # quedan listadas en 'actividades_omitidas' del resumen.
+            if not codigo_materia or not nombre_materia:
+                print(f"[LOADER] ÔÜá´©Å  Actividad sin c├│digo o nombre, se omite: {actividad}")
+                omitidas.append(actividad.get("nombre") or "(sin nombre)")
+                continue
 
-            # Vincular Carrera_Materia
-            cursor.execute("""
-                INSERT OR IGNORE INTO Carrera_Materia (id_carrera, id_materia) VALUES (?, ?)
-            """, (id_carrera, id_materia))
+            id_materia = _get_or_create_materia(conn, codigo_materia, nombre_materia)
+            _link_carrera_materia(conn, id_carrera, id_materia)
 
+            # --------------------------------------------------------------
+            # 4. Iterar comisiones
+            # --------------------------------------------------------------
             for comision in actividad.get("comisiones", []):
-                num_comision = comision.get("numero_comision") or 1
-                modalidad_str = (comision.get("modalidad") or "Presencial").title()
-                nombre_completo = comision.get("nombre_completo") or f"COMISIÓN {num_comision}"
+                modalidad_nombre = comision.get("modalidad") or "Sin Modalidad"
+                id_modalidad = _get_or_create(conn, "Modalidad", "nombre", modalidad_nombre)
 
-                id_modalidad = obtener_o_crear_id(cursor, "Modalidad", "id_modalidad", "nombre", modalidad_str)
+                numero = comision.get("numero_comision")
+                nombre_completo = comision.get("nombre_completo", "")
 
-                cursor.execute("""
-                    INSERT OR IGNORE INTO Comision (id_periodo, id_materia, id_modalidad, numero_comision, nombre_completo)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (id_periodo, id_materia, id_modalidad, num_comision, nombre_completo))
+                if numero is None:
+                    print(f"[LOADER] ÔÜá´©Å  Comisi├│n sin n├║mero en '{nombre_materia}', se omite.")
+                    continue
 
-                cursor.execute("""
-                    SELECT id_comision FROM Comision 
-                    WHERE id_periodo = ? AND id_materia = ? AND numero_comision = ?
-                """, (id_periodo, id_materia, num_comision))
-                
-                id_comision = cursor.fetchone()[0]
+                id_comision = _get_or_create_comision(
+                    conn, id_periodo, id_carrera, id_materia, id_modalidad, numero, nombre_completo
+                )
                 total_comisiones += 1
 
-                for estado_item in comision.get("estados", []):
-                    estado_str = (estado_item.get("estado") or "Sin Condición").title()
-                    total_alumnos = estado_item.get("total_alumnos") or 0
+                # ----------------------------------------------------------
+                # 5. Iterar estados ÔåÆ Resultado_Comision
+                # ----------------------------------------------------------
+                for estado_data in comision.get("estados", []):
+                    estado_nombre = estado_data.get("estado")
+                    cantidad = estado_data.get("total_alumnos")
 
-                    id_estado = obtener_o_crear_id(cursor, "Estado", "id_estado", "nombre", estado_str)
+                    if not estado_nombre or cantidad is None:
+                        continue
 
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO Resultado_Comision (id_comision, id_estado, cantidad_alumnos)
-                        VALUES (?, ?, ?)
-                    """, (id_comision, id_estado, total_alumnos))
+                    id_estado = _get_or_create(conn, "Estado", "nombre", estado_nombre)
+                    _upsert_resultado(conn, id_comision, id_estado, cantidad)
                     total_resultados += 1
 
         conn.commit()
-        print(f"[LOAD] Carga completada con éxito para el período ID {id_periodo} ({label_periodo}).")
+        print(f"[LOADER] Ô£à Carga completada ÔÇö {len(datos.get('actividades', [])) - len(omitidas)} materias, "
+              f"{total_comisiones} comisiones, {total_resultados} resultados.")
 
     except Exception as e:
         conn.rollback()
-        print(f"[LOAD ERROR] Error durante la persistencia en la DB: {e}")
-        raise e
+        print(f"[LOADER] ÔØî Error durante la carga, se hizo rollback: {e}")
+        raise
     finally:
-        conn.close()
+        conn.close()  # la conexi├│n ya no es compartida: la cierra quien la abre
 
     return {
-        "periodo_id": id_periodo,
-        "periodo": label_periodo,
-        "nombre_carrera": nombre_carrera,
-        "materias_procesadas": total_materias,
-        "comisiones_procesadas": total_comisiones,
-        "resultados_guardados": total_resultados
+        "periodo": f"{anio} - {cuatrimestre}",
+        "nombre_carrera": datos["nombre_carrera"],
+        "actividades_omitidas": omitidas,
+        "actividades_cargadas": len(datos.get("actividades", [])) - len(omitidas),
+        "comisiones_cargadas": total_comisiones,
+        "resultados_cargados": total_resultados,
     }
