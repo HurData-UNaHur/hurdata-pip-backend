@@ -309,6 +309,38 @@ def borrar_periodo(
             conn.execute("DELETE FROM Periodo WHERE id_periodo = ?", (id_periodo,))
 
 
+def listar_cargas(
+    conn: sqlite3.Connection, usuario: str | None = None, estado: str | None = None
+) -> list[dict]:
+    """
+    Historial de cargas, la más reciente primero.
+
+    Args:
+        usuario: si se indica (email), solo las cargas de ese usuario.
+        estado:  'activa' | 'reemplazada' | 'borrada'; None = todas.
+
+    Retorna una lista de dicts con los campos de Carga más el NOMBRE de quien
+    la dio de baja (no el email).
+    """
+    sql = """
+        SELECT cg.id_carga, cg.fecha, cg.nombre_archivo, cg.nombre_usuario AS cargado_por,
+               cg.periodo_label, cg.nombre_carrera, cg.materias, cg.comisiones, cg.resultados,
+               cg.estado, COALESCE(u.nombre, cg.dado_de_baja_por) AS dado_de_baja_por, cg.fecha_baja
+        FROM Carga cg
+        LEFT JOIN Usuario u ON u.usuario = cg.dado_de_baja_por
+        WHERE 1 = 1
+    """
+    params: list = []
+    if usuario is not None:
+        sql += " AND cg.usuario = ?"
+        params.append(usuario)
+    if estado is not None:
+        sql += " AND cg.estado = ?"
+        params.append(estado)
+    sql += " ORDER BY cg.id_carga DESC"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
 # Orden de borrado: primero las tablas hijas y al final las que otras referencian,
 # así no se viola ninguna clave foránea.
 _TABLAS_HIJAS_PRIMERO = (

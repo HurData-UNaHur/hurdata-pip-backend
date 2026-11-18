@@ -305,3 +305,36 @@ def test_15_dueno_de_la_carga(c):
     total = conn.execute("SELECT COUNT(*) FROM Carga").fetchone()[0]
     conn.close()
     assert activas == 0 and total > 0
+
+
+def test_16_historial_de_cargas(c):
+    docente = token_de(c, "docente@unahur.edu.ar")
+    no_docente = token_de(c, "nodocente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    assert c.get("/api/cargas").status_code == 401                     # requiere login
+    assert c.get("/api/cargas", headers=no_docente).status_code == 403  # No Docente no ve
+
+    # Docente: solo las suyas
+    d = c.get("/api/cargas", headers=docente).json()
+    assert d["ve_todas"] is False and d["cargas"]
+    assert {x["cargado_por"] for x in d["cargas"]} == {"Docente"}
+
+    # Directivo: todas (incluye las del docente y las del admin)
+    t = c.get("/api/cargas", headers=directivo).json()
+    assert t["ve_todas"] is True
+    assert {"Docente", "Admin"} <= {x["cargado_por"] for x in t["cargas"]}
+    assert len(t["cargas"]) > len(d["cargas"])
+
+    # Orden: la más reciente primero, con fecha ISO y nombre de archivo original
+    ids = [x["id_carga"] for x in t["cargas"]]
+    assert ids == sorted(ids, reverse=True)
+    reemplazada = next(x for x in t["cargas"] if x["nombre_archivo"] == "a.xlsx")
+    assert reemplazada["estado"] == "reemplazada" and reemplazada["fecha"].endswith("+00:00")
+    borrada = next(x for x in t["cargas"] if x["nombre_archivo"] == "a-v2.xlsx")
+    assert borrada["dado_de_baja_por"] == "Directivo"                   # nombre, no email
+
+    # Filtro por estado
+    solo_borradas = c.get("/api/cargas", params={"estado": "borrada"}, headers=directivo).json()["cargas"]
+    assert solo_borradas and {x["estado"] for x in solo_borradas} == {"borrada"}
+    assert c.get("/api/cargas", params={"estado": "otro"}, headers=directivo).status_code == 422
