@@ -89,3 +89,26 @@ class DatosOut(BaseModel):
 
 class MensajeOut(BaseModel):
     message: str
+
+# ---------------------------------------------------------------------------
+# POST /api/login  /  GET /api/directivos
+# ---------------------------------------------------------------------------
+
+class LoginIn(BaseModel):
+    usuario: str
+    password: str
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class DirectivoOut(BaseModel):
+    id: int
+    nombre: str
+    email: str
+
+
+class DirectivosOut(BaseModel):
+    directivos: list[DirectivoOut]

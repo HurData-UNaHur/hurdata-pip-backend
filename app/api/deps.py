@@ -1,10 +1,10 @@
 """
 deps.py
 =======
-Responsabilidad: dependencias reutilizables de FastAPI (las que se usan con Depends).
+Dependencias reutilizables de FastAPI.
 
     get_db()        → entrega una conexión SQLite por request y la cierra al terminar.
-    require_admin() → exige la API key en los endpoints que modifican datos.
+    require_admin() → valida el Bearer JWT y retorna el payload.
 
 Uso típico en un endpoint:
     @router.get("/periodos")
@@ -12,14 +12,16 @@ Uso típico en un endpoint:
         return queries.listar_periodos(conn)
 """
 
-import secrets
 import sqlite3
 from typing import Iterator
 
-from fastapi import Header, HTTPException
+from fastapi import Depends
+from fastapi.security import OAuth2PasswordBearer
 
-from app.config import config
+from app.api.auth import verificar_token
 from app.db.connection import get_connection
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 
 # ---------------------------------------------------------------------------
@@ -45,19 +47,19 @@ def get_db() -> Iterator[sqlite3.Connection]:
 # Autorización de endpoints que modifican datos
 # ---------------------------------------------------------------------------
 
-def require_admin(x_api_key: str = Header(default="")) -> None:
+def require_admin(token: str = Depends(oauth2_scheme)) -> dict:
     """
-    Protege los endpoints que modifican datos (subir, borrar).
+    Valida el Bearer JWT y verifica que el usuario tenga role 'admin'.
+    Lanza 401 si el token es inválido y 403 si el usuario no tiene permisos.
 
-    - Si ADMIN_API_KEY está definida en .env: exige el header X-API-Key con ese valor.
-    - Si no está definida: modo desarrollo, deja pasar. En producción, SIEMPRE definirla.
-
-    Errors:
-        401: si la clave falta o no coincide.
+    Los endpoints protegidos esperan el header:
+        Authorization: Bearer <token>
     """
-    if not config.ADMIN_API_KEY:
-        return  # modo desarrollo: no hay clave configurada
-
-    # compare_digest compara en tiempo constante (evita ataques por tiempo de respuesta)
-    if not secrets.compare_digest(x_api_key, config.ADMIN_API_KEY):
-        raise HTTPException(status_code=401, detail="API key inválida o ausente.")
+    from fastapi import HTTPException, status
+    payload = verificar_token(token)
+    if payload.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permisos para realizar esta acción.",
+        )
+    return payload

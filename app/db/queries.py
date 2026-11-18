@@ -256,3 +256,15 @@ def vaciar_base(conn: sqlite3.Connection) -> None:
         for tabla in _TABLAS_HIJAS_PRIMERO:  # lista fija: nunca viene del usuario
             conn.execute(f"DELETE FROM {tabla}")
         conn.execute("DELETE FROM sqlite_sequence")  # los ids vuelven a empezar en 1
+
+
+# ---------------------------------------------------------------------------
+# Directivos
+# ---------------------------------------------------------------------------
+
+def listar_directivos(conn: sqlite3.Connection) -> list[dict]:
+    """Devuelve todos los directivos cargados."""
+    rows = conn.execute(
+        "SELECT id_directivo AS id, nombre, email FROM Directivo ORDER BY id_directivo"
+    ).fetchall()
+    return [dict(r) for r in rows]

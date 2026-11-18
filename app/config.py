@@ -40,6 +40,14 @@ class Config:
     # Si queda vacía, no se exige (modo desarrollo). En producción, SIEMPRE definirla.
     ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
 
+    # Clave secreta para firmar JWTs. Generarla con: openssl rand -hex 32
+    # En producción, SIEMPRE definirla en .env.
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
+
+    # Contraseña por defecto para usuarios precargados en seed.py.
+    # Cambiarla en .env antes de desplegar en producción.
+    SEED_DEFAULT_PASSWORD: str = os.getenv("SEED_DEFAULT_PASSWORD", "Origone151")
+
     # Tamaño máximo (en MB) de un Excel subido por /upload.
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
 
