@@ -20,7 +20,7 @@ _DIRECTIVOS = [
 
 _USUARIOS = [
     ("docente@unahur.edu.ar",    "Docente",    "Docente",       "autorizado"),
-    ("nodocente@unahur.edu.ar",  "Nodocente",  "Nodocente",     "autorizado"),
+    ("nodocente@unahur.edu.ar",  "No Docente", "No Docente",    "autorizado"),
     ("directivo@unahur.edu.ar",  "Directivo",  "Directivo",     "autorizado"),
     ("admin@unahur.edu.ar",      "Admin",       "Desarrollador", "admin"),
 ]
