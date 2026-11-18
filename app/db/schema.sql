@@ -110,7 +110,9 @@ CREATE TABLE IF NOT EXISTS Usuario (
     usuario         TEXT    NOT NULL UNIQUE,
     nombre          TEXT    NOT NULL,
     cargo           TEXT    NOT NULL,
-    role            TEXT    NOT NULL DEFAULT 'autorizado',
+    -- Los permisos de cada rol están en app/api/permisos.py
+    role            TEXT    NOT NULL
+                    CHECK (role IN ('admin', 'directivo', 'docente', 'no_docente')),
     password_hash   TEXT    NOT NULL
 );
 

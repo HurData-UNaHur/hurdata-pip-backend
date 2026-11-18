@@ -1,12 +1,12 @@
 """
 admin.py
 ========
-Responsabilidad: endpoints que MODIFICAN datos. Todo este router exige la API key
-(ver app/api/deps.py: require_admin).
+Responsabilidad: endpoints que MODIFICAN datos. Cada uno exige un permiso
+(ver app/api/permisos.py y app/api/deps.py: require_permiso).
 
-    POST   /upload                  → carga un Excel del SIU (pipeline ETL completo)
-    DELETE /api/periodos/{id}       → borra un período, o una carrera dentro de él
-    DELETE /api/limpiar-db          → vacía toda la base de datos
+    POST   /upload                  → carga un Excel del SIU          (datos:cargar)
+    DELETE /api/periodos/{id}       → borra un período o una carrera  (datos:borrar)
+    DELETE /api/limpiar-db          → vacía toda la base de datos     (db:resetear)
 """
 
 import logging
@@ -15,7 +15,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
-from app.api.deps import get_db, require_admin
+from app.api import permisos as P
+from app.api.deps import get_db, require_permiso
 from app.api.schemas import MensajeOut
 from app.config import config
 from app.db import queries
@@ -24,8 +25,8 @@ from app.etl.pipeline import ejecutar_etl
 # Logger para registrar errores internos sin mostrárselos al cliente
 log = logging.getLogger("hurdata")
 
-# 'dependencies' se aplica a TODOS los endpoints de este router
-router = APIRouter(tags=["Administración"], dependencies=[Depends(require_admin)])
+# Cada endpoint declara su propio permiso con Depends(require_permiso(...))
+router = APIRouter(tags=["Administración"])
 
 # Los primeros 4 bytes de todo .xlsx (un .xlsx es un archivo zip)
 _XLSX_MAGIC = b"PK\x03\x04"
@@ -36,7 +37,10 @@ _XLSX_MAGIC = b"PK\x03\x04"
 # ---------------------------------------------------------------------------
 
 @router.post("/upload", tags=["ETL"], status_code=201)
-def upload_excel(archivo: UploadFile = File(...)):
+def upload_excel(
+    archivo: UploadFile = File(...),
+    usuario: dict = Depends(require_permiso(P.CARGAR)),
+):
     """
     Recibe un archivo .xlsx del SIU Guaraní, ejecuta el pipeline ETL completo
     (Extract → Transform → Load) y persiste los datos en la DB.
@@ -106,6 +110,7 @@ def eliminar_periodo(
     id_periodo: int,
     id_carrera: int | None = Query(None),   # opcional: si falta, se borra el período entero
     conn=Depends(get_db),
+    usuario: dict = Depends(require_permiso(P.BORRAR)),
 ):
     """
     Borra los datos de un período.
@@ -126,7 +131,7 @@ def eliminar_periodo(
 
 
 @router.delete("/api/limpiar-db", response_model=MensajeOut)
-def limpiar_db(conn=Depends(get_db)):
+def limpiar_db(conn=Depends(get_db), usuario: dict = Depends(require_permiso(P.RESETEAR_DB))):
     """Vacía todas las tablas de la base de datos (acción destructiva)."""
     queries.vaciar_base(conn)
     return {"message": "Base de datos reiniciada con éxito."}

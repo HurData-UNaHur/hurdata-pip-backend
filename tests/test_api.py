@@ -1,10 +1,15 @@
 
-import io, os, tempfile
+import io, os
 from pathlib import Path
  
 # La DB de prueba y las variables de entorno se definen ANTES de importar la app.
-_tmp = tempfile.mkdtemp()
-os.environ["DB_PATH"] = str(Path(_tmp) / "test.db")
+# config.py solo acepta un NOMBRE de archivo (siempre en la raíz del proyecto, por
+# seguridad), así que la DB de prueba es <raíz>/test.db. Se borra al empezar para
+# que cada corrida arranque vacía y con el schema actual.
+_RAIZ = Path(__file__).resolve().parent.parent
+for _sufijo in ("", "-wal", "-shm"):
+    (_RAIZ / f"test.db{_sufijo}").unlink(missing_ok=True)
+os.environ["DB_PATH"] = "test.db"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-unit-tests-aaaabbbbccccdddd"
  
 import pytest
@@ -190,3 +195,37 @@ def test_13_actividad_sin_codigo_se_informa_no_se_pierde_en_silencio(c):
     resumen = cargar_reporte(datos)
     assert resumen["actividades_omitidas"] == ["Sin código"]
     assert resumen["actividades_cargadas"] == 1
+
+
+def token_de(c, usuario: str) -> dict:
+    """Header Authorization con un JWT real del usuario precargado indicado."""
+    r = c.post("/api/login", json={"usuario": usuario, "password": "Origone151"})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def test_14_permisos_por_rol(c):
+    """Matriz de permisos (app/api/permisos.py) aplicada a los endpoints."""
+    import base64, json
+    docente = token_de(c, "docente@unahur.edu.ar")
+    no_docente = token_de(c, "nodocente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    # El JWT lleva el rol y los permisos para el frontend
+    payload_b64 = no_docente["Authorization"].split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)))
+    assert payload["role"] == "no_docente" and payload["permisos"] == []
+
+    # No Docente: solo ve
+    assert subir(c, excel("030", "Tecnicatura X", 1, 1), headers=no_docente).status_code == 403
+    assert c.delete("/api/periodos/1", headers=no_docente).status_code == 403
+    assert c.get("/api/periodos").status_code == 200
+
+    # Docente y Directivo cargan, pero no resetean la DB
+    assert subir(c, excel("031", "Tecnicatura Docente", 1, 1), headers=docente).status_code == 201
+    assert subir(c, excel("032", "Tecnicatura Directivo", 1, 1), headers=directivo).status_code == 201
+    assert c.delete("/api/limpiar-db", headers=docente).status_code == 403
+    assert c.delete("/api/limpiar-db", headers=directivo).status_code == 403
+
+    # Solo el admin resetea
+    assert c.delete("/api/limpiar-db", headers=H).status_code == 200
