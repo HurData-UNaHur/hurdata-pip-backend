@@ -15,8 +15,13 @@ Funciones de lectura (las usa app/api/routers/consultas.py):
 
 Funciones de borrado (las usa app/api/routers/admin.py):
     obtener_periodo(conn, id_periodo)
-    borrar_periodo(conn, id_periodo, id_carrera)
-    vaciar_base(conn)
+    borrar_periodo(conn, id_periodo, id_carrera, borrado_por)
+    vaciar_base(conn, borrado_por)
+
+Historial y dueño de cargas (tabla Carga):
+    dueno_carga(conn, id_periodo, id_carrera)
+    carreras_con_datos(conn, id_periodo)
+    dar_de_baja_cargas(conn, estado, por, id_periodo, id_carrera)
 
 Nota sobre el modelo:
     Una Comision pertenece a un período Y a una carrera (columna id_carrera).
@@ -25,6 +30,7 @@ Nota sobre el modelo:
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +92,73 @@ def listar_periodos_con_carreras(conn: sqlite3.Connection) -> list[dict]:
     (equivale a un Excel cargado). Se usa en el modal de gestión de datos.
 
     Retorna:
-        [{"id_periodo": int, "id_carrera": int, "label": str, "nombre_carrera": str}, ...]
+        [{"id_periodo": int, "id_carrera": int, "label": str, "nombre_carrera": str,
+          "cargado_por": str | None,   # nombre de quien hizo la carga activa
+          "dueno": str | None}, ...]   # email del dueño (uso interno, el router no lo expone)
     """
     rows = conn.execute(
         """
-        SELECT DISTINCT p.id_periodo, car.id_carrera, p.label, car.nombre AS nombre_carrera
+        SELECT DISTINCT p.id_periodo, car.id_carrera, p.label, car.nombre AS nombre_carrera,
+               cg.nombre_usuario AS cargado_por, cg.usuario AS dueno
         FROM Comision c
         JOIN Periodo p   ON p.id_periodo   = c.id_periodo
         JOIN Carrera car ON car.id_carrera = c.id_carrera
+        LEFT JOIN Carga cg ON cg.id_periodo = c.id_periodo
+                          AND cg.id_carrera = c.id_carrera
+                          AND cg.estado = 'activa'
         ORDER BY p.anio DESC, p.cuatrimestre DESC, car.nombre
         """
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Dueño de cada carga (tabla Carga, ver schema.sql)
+# ---------------------------------------------------------------------------
+
+def dueno_carga(conn: sqlite3.Connection, id_periodo: int, id_carrera: int) -> str | None:
+    """Email de quien hizo la carga ACTIVA de ese período + carrera, o None si no hay."""
+    row = conn.execute(
+        "SELECT usuario FROM Carga WHERE id_periodo = ? AND id_carrera = ? AND estado = 'activa'",
+        (id_periodo, id_carrera),
+    ).fetchone()
+    return row["usuario"] if row else None
+
+
+def carreras_con_datos(conn: sqlite3.Connection, id_periodo: int) -> list[int]:
+    """ids de las carreras que tienen comisiones cargadas en el período."""
+    rows = conn.execute(
+        "SELECT DISTINCT id_carrera FROM Comision WHERE id_periodo = ?", (id_periodo,)
+    ).fetchall()
+    return [r["id_carrera"] for r in rows]
+
+
+def dar_de_baja_cargas(
+    conn: sqlite3.Connection,
+    estado: str,
+    por: str,
+    id_periodo: int | None = None,
+    id_carrera: int | None = None,
+) -> None:
+    """
+    Pasa las cargas ACTIVAS a 'reemplazada' o 'borrada', registrando quién y cuándo.
+    Sin id_periodo afecta a todas; con id_periodo y sin id_carrera, a todo el período.
+    No hace commit: se usa dentro de la transacción de quien la llama.
+    """
+    sql = "UPDATE Carga SET estado = ?, dado_de_baja_por = ?, fecha_baja = ? WHERE estado = 'activa'"
+    params: list = [estado, por, ahora_utc()]
+    if id_periodo is not None:
+        sql += " AND id_periodo = ?"
+        params.append(id_periodo)
+    if id_carrera is not None:
+        sql += " AND id_carrera = ?"
+        params.append(id_carrera)
+    conn.execute(sql, params)
+
+
+def ahora_utc() -> str:
+    """Fecha y hora actual en UTC, formato ISO 8601 (ej. '2026-11-18T19:40:05+00:00')."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -210,19 +271,25 @@ def obtener_periodo(conn: sqlite3.Connection, id_periodo: int) -> dict | None:
     return dict(row) if row else None
 
 
-def borrar_periodo(conn: sqlite3.Connection, id_periodo: int, id_carrera: int | None) -> None:
+def borrar_periodo(
+    conn: sqlite3.Connection, id_periodo: int, id_carrera: int | None, borrado_por: str
+) -> None:
     """
-    Borra datos de un período.
+    Borra datos de un período y marca sus cargas como 'borrada' en el historial.
+    Los permisos (dueño de la carga, etc.) los valida el router ANTES de llamar.
 
     Args:
-        id_periodo: período a borrar.
-        id_carrera: si es None, borra el período COMPLETO (todas las carreras).
-                    Si se indica, borra solo los datos de esa carrera en ese período,
-                    y si el período queda sin comisiones, borra también el período.
+        id_periodo:  período a borrar.
+        id_carrera:  si es None, borra el período COMPLETO (todas las carreras).
+                     Si se indica, borra solo los datos de esa carrera en ese período,
+                     y si el período queda sin comisiones, borra también el período.
+        borrado_por: email del usuario que borra (queda en el historial).
     """
     # 'with conn' abre una transacción: si todo sale bien hace commit,
     # y si algo falla hace rollback (nunca queda el borrado a medias).
     with conn:
+        dar_de_baja_cargas(conn, "borrada", borrado_por, id_periodo, id_carrera)
+
         if id_carrera is None:
             # Borrar el período arrastra comisiones y resultados por ON DELETE CASCADE
             conn.execute("DELETE FROM Periodo WHERE id_periodo = ?", (id_periodo,))
@@ -250,12 +317,19 @@ _TABLAS_HIJAS_PRIMERO = (
 )
 
 
-def vaciar_base(conn: sqlite3.Connection) -> None:
-    """Vacía todas las tablas y reinicia los contadores AUTOINCREMENT."""
+def vaciar_base(conn: sqlite3.Connection, borrado_por: str) -> None:
+    """
+    Vacía las tablas de datos académicos y reinicia sus contadores AUTOINCREMENT.
+    NO toca Usuario, Directivo ni el historial de Carga: las cargas activas
+    quedan marcadas como 'borrada' por quien hizo el reset.
+    """
     with conn:  # transacción: o se vacía todo o no se vacía nada
+        dar_de_baja_cargas(conn, "borrada", borrado_por)
         for tabla in _TABLAS_HIJAS_PRIMERO:  # lista fija: nunca viene del usuario
             conn.execute(f"DELETE FROM {tabla}")
-        conn.execute("DELETE FROM sqlite_sequence")  # los ids vuelven a empezar en 1
+        # Solo se reinician los ids de las tablas vaciadas (los de Carga y Usuario siguen)
+        marcadores = ", ".join("?" for _ in _TABLAS_HIJAS_PRIMERO)
+        conn.execute(f"DELETE FROM sqlite_sequence WHERE name IN ({marcadores})", _TABLAS_HIJAS_PRIMERO)
 
 
 # ---------------------------------------------------------------------------

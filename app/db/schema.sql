@@ -121,3 +121,38 @@ CREATE TABLE IF NOT EXISTS Directivo (
     nombre          TEXT    NOT NULL,
     email           TEXT    NOT NULL UNIQUE
 );
+
+-- -----------------------------------------------------------------------------
+-- Historial de cargas de Excel (auditoría + dueño de cada carga)
+-- -----------------------------------------------------------------------------
+-- Una fila por CADA subida. La fila 'activa' de un período + carrera indica
+-- quién es el dueño de esos datos (solo él, un directivo o el admin pueden
+-- borrarlos o recargarlos). Al recargar, la anterior pasa a 'reemplazada';
+-- al borrar, a 'borrada'.
+--
+-- Sin FOREIGN KEY a Periodo/Carrera a propósito: el historial tiene que
+-- sobrevivir cuando se borran los datos. Por eso guarda también el label del
+-- período y el nombre de la carrera como texto.
+
+CREATE TABLE IF NOT EXISTS Carga (
+    id_carga        INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha           TEXT    NOT NULL,            -- ISO 8601 en UTC
+    nombre_archivo  TEXT    NOT NULL,            -- nombre original del .xlsx (el archivo NO se guarda)
+    usuario         TEXT    NOT NULL,            -- email (sub del JWT) de quien subió
+    nombre_usuario  TEXT    NOT NULL,
+    id_periodo      INTEGER NOT NULL,
+    id_carrera      INTEGER NOT NULL,
+    periodo_label   TEXT    NOT NULL,
+    nombre_carrera  TEXT    NOT NULL,
+    materias        INTEGER NOT NULL DEFAULT 0,
+    comisiones      INTEGER NOT NULL DEFAULT 0,
+    resultados      INTEGER NOT NULL DEFAULT 0,
+    estado          TEXT    NOT NULL DEFAULT 'activa'
+                    CHECK (estado IN ('activa', 'reemplazada', 'borrada')),
+    dado_de_baja_por TEXT,                       -- email de quien la reemplazó o borró
+    fecha_baja      TEXT
+);
+
+-- Como mucho UNA carga activa por período + carrera
+CREATE UNIQUE INDEX IF NOT EXISTS idx_carga_activa
+    ON Carga(id_periodo, id_carrera) WHERE estado = 'activa';

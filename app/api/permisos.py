@@ -47,3 +47,21 @@ PERMISOS_POR_ROL: dict[str, frozenset[str]] = {
 def permisos_de(role: str | None) -> frozenset[str]:
     """Permisos de un rol. Un rol desconocido (ej. tokens viejos con 'autorizado') no tiene ninguno."""
     return PERMISOS_POR_ROL.get(role or "", frozenset())
+
+
+def puede_modificar_carga(usuario: dict, dueno: str | None) -> bool:
+    """
+    Regla de dueño para borrar o recargar los datos de un período + carrera.
+
+        • Con datos:borrar_cualquiera (Directivo, Admin) → siempre.
+        • Con datos:borrar (Docente) → solo si es el dueño de la carga activa.
+        • Datos sin carga registrada (dueno=None) → solo con datos:borrar_cualquiera.
+
+    Args:
+        usuario: payload del JWT con 'sub' y 'permisos' (ver deps.get_usuario_actual).
+        dueno:   email del dueño de la carga activa, o None.
+    """
+    permisos = usuario.get("permisos", frozenset())
+    if BORRAR_CUALQUIERA in permisos:
+        return True
+    return BORRAR in permisos and dueno is not None and dueno == usuario.get("sub")

@@ -6,7 +6,7 @@ gráficos del frontend.
 
     GET /api/periodos            → períodos cargados
     GET /api/carreras            → carreras con datos (filtrable por período)
-    GET /api/periodos-carreras   → cada combinación período + carrera cargada
+    GET /api/periodos-carreras   → cada combinación período + carrera cargada (requiere login)
     GET /api/datos               → actividades, comisiones y resultados
 
 Cada función solo recibe los parámetros, llama a app/db/queries.py y devuelve
@@ -15,7 +15,8 @@ el resultado; el SQL no vive acá.
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_db
+from app.api.deps import get_db, get_usuario_actual
+from app.api.permisos import puede_modificar_carga
 from app.api.schemas import CarrerasOut, DatosOut, PeriodosCarrerasOut, PeriodosOut
 from app.db import queries
 
@@ -43,9 +44,15 @@ def carreras(
 
 
 @router.get("/periodos-carreras", response_model=PeriodosCarrerasOut)
-def periodos_carreras(conn=Depends(get_db)):
-    """Cada combinación período + carrera cargada (equivale a un Excel subido)."""
-    return {"periodos": queries.listar_periodos_con_carreras(conn)}
+def periodos_carreras(conn=Depends(get_db), usuario: dict = Depends(get_usuario_actual)):
+    """
+    Cada combinación período + carrera cargada (equivale a un Excel subido).
+    Requiere login: indica quién la cargó y si el usuario actual puede borrarla.
+    """
+    filas = queries.listar_periodos_con_carreras(conn)
+    for f in filas:
+        f["puede_borrar"] = puede_modificar_carga(usuario, f.pop("dueno"))  # el email no se expone
+    return {"periodos": filas}
 
 
 # ---------------------------------------------------------------------------

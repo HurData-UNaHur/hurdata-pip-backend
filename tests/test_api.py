@@ -87,7 +87,7 @@ def test_03_listados(c):
     assert [x["label"] for x in p] == ["2022 - PRIMER CUATRIMESTRE"]
     car = c.get("/api/carreras", params={"periodo": p[0]["label"]}).json()["carreras"]
     assert [x["nombre"] for x in car] == ["Licenciatura en Informática", "Licenciatura en Sistemas"]
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     assert len(pc) == 2 and {"id_periodo", "id_carrera", "label", "nombre_carrera"} <= set(pc[0])
  
  
@@ -149,7 +149,7 @@ def test_08_auth_en_endpoints_destructivos(c):
  
  
 def test_09_borrar_una_carrera_no_toca_la_otra(c):
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     inf = next(x for x in pc if x["nombre_carrera"] == "Licenciatura en Informática")
     r = c.delete(f"/api/periodos/{inf['id_periodo']}", params={"id_carrera": inf["id_carrera"]}, headers=H)
     assert r.status_code == 200
@@ -160,7 +160,7 @@ def test_09_borrar_una_carrera_no_toca_la_otra(c):
  
  
 def test_10_borrar_ultima_carrera_borra_el_periodo_y_404(c):
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     assert len(pc) == 1
     c.delete(f"/api/periodos/{pc[0]['id_periodo']}", params={"id_carrera": pc[0]["id_carrera"]}, headers=H)
     assert c.get("/api/periodos").json()["periodos"] == []
@@ -229,3 +229,79 @@ def test_14_permisos_por_rol(c):
 
     # Solo el admin resetea
     assert c.delete("/api/limpiar-db", headers=H).status_code == 200
+
+
+def _crear_docente(email: str) -> None:
+    """Crea un segundo docente directo en la DB de prueba (el seed trae uno solo)."""
+    from app.api.auth import hashear_password
+    from app.db.connection import get_connection
+    conn = get_connection()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO Usuario (usuario, nombre, cargo, role, password_hash) "
+            "VALUES (?, 'Otro Docente', 'Docente', 'docente', ?)",
+            (email, hashear_password("Origone151")),
+        )
+    conn.close()
+
+
+def _fila(c, headers, carrera):
+    pc = c.get("/api/periodos-carreras", headers=headers).json()["periodos"]
+    return next(x for x in pc if x["nombre_carrera"] == carrera)
+
+
+def test_15_dueno_de_la_carga(c):
+    _crear_docente("otro.docente@unahur.edu.ar")
+    docente = token_de(c, "docente@unahur.edu.ar")
+    otro = token_de(c, "otro.docente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    # periodos-carreras requiere login
+    assert c.get("/api/periodos-carreras").status_code == 401
+
+    # El docente carga dos carreras: queda como dueño
+    assert subir(c, excel("040", "Carrera A", 5, 5), "a.xlsx", headers=docente).status_code == 201
+    assert subir(c, excel("041", "Carrera B", 5, 5), "b.xlsx", headers=docente).status_code == 201
+    fila_dueno = _fila(c, docente, "Carrera A")
+    assert fila_dueno["cargado_por"] == "Docente" and fila_dueno["puede_borrar"] is True
+    assert "dueno" not in fila_dueno                         # el email no se expone
+    fila_otro = _fila(c, otro, "Carrera A")
+    assert fila_otro["puede_borrar"] is False
+
+    # Otro docente NO puede recargar, borrar la carrera ni borrar el período completo
+    r = subir(c, excel("040", "Carrera A", 99, 1), headers=otro)
+    assert r.status_code == 403
+    assert libres_ingles(c.get("/api/datos", params={"periodo": "2022 - PRIMER CUATRIMESTRE",
+                                                     "carrera": "Carrera A"}).json()) == 5  # intacta
+    id_p, id_a = fila_dueno["id_periodo"], fila_dueno["id_carrera"]
+    assert c.delete(f"/api/periodos/{id_p}", params={"id_carrera": id_a}, headers=otro).status_code == 403
+    assert c.delete(f"/api/periodos/{id_p}", headers=otro).status_code == 403
+
+    # El dueño sí puede recargar (la carga anterior queda 'reemplazada')
+    assert subir(c, excel("040", "Carrera A", 7, 3), "a-v2.xlsx", headers=docente).status_code == 201
+
+    # El directivo puede borrar cargas de otros
+    assert c.delete(f"/api/periodos/{id_p}", params={"id_carrera": id_a}, headers=directivo).status_code == 200
+
+    # El historial conserva todo: estado, archivo, quién y quién dio de baja
+    from app.db.connection import get_connection
+    conn = get_connection()
+    filas = [dict(r) for r in conn.execute(
+        "SELECT nombre_archivo, usuario, estado, dado_de_baja_por FROM Carga "
+        "WHERE nombre_carrera = 'Carrera A' ORDER BY id_carga"
+    ).fetchall()]
+    conn.close()
+    assert filas == [
+        {"nombre_archivo": "a.xlsx", "usuario": "docente@unahur.edu.ar",
+         "estado": "reemplazada", "dado_de_baja_por": "docente@unahur.edu.ar"},
+        {"nombre_archivo": "a-v2.xlsx", "usuario": "docente@unahur.edu.ar",
+         "estado": "borrada", "dado_de_baja_por": "directivo@unahur.edu.ar"},
+    ]
+
+    # El reset (admin) marca las activas como borradas pero conserva el historial
+    assert c.delete("/api/limpiar-db", headers=H).status_code == 200
+    conn = get_connection()
+    activas = conn.execute("SELECT COUNT(*) FROM Carga WHERE estado = 'activa'").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM Carga").fetchone()[0]
+    conn.close()
+    assert activas == 0 and total > 0

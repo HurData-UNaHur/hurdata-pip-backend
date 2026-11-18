@@ -49,6 +49,8 @@ class PeriodoCarreraOut(BaseModel):
     id_carrera: int
     label: str              # label del período
     nombre_carrera: str
+    cargado_por: str | None # nombre de quien hizo la carga activa (None: sin carga registrada)
+    puede_borrar: bool      # si el usuario actual puede borrar o recargar esta carga
 
 
 class PeriodosCarrerasOut(BaseModel):

@@ -20,6 +20,7 @@ from app.api.deps import get_db, require_permiso
 from app.api.schemas import MensajeOut
 from app.config import config
 from app.db import queries
+from app.db.loader import CargaNoAutorizada
 from app.etl.pipeline import ejecutar_etl
 
 # Logger para registrar errores internos sin mostrárselos al cliente
@@ -83,9 +84,19 @@ def upload_excel(
                     raise HTTPException(413, f"El archivo supera {config.MAX_UPLOAD_MB} MB.")
                 tmp.write(chunk)
 
-        resumen = ejecutar_etl(ruta_excel=ruta_tmp)
+        carga = {
+            "usuario": usuario["sub"],
+            "nombre_usuario": usuario.get("nombre") or usuario["sub"],
+            # Solo el nombre (sin ruta) y acotado: viene del cliente
+            "nombre_archivo": Path(archivo.filename).name[:200],
+            # Recargar datos que ya existen: solo el dueño, un directivo o el admin
+            "autorizar_reemplazo": lambda dueno: P.puede_modificar_carga(usuario, dueno),
+        }
+        resumen = ejecutar_etl(ruta_excel=ruta_tmp, carga=carga)
     except HTTPException:
         raise                                    # ya tiene su código y mensaje
+    except CargaNoAutorizada as e:               # datos de otro usuario
+        raise HTTPException(403, str(e))
     except ValueError as e:                      # Excel con formato inesperado
         raise HTTPException(422, str(e))
     except Exception:                            # bug nuestro: detalle al log, mensaje genérico al cliente
@@ -119,19 +130,31 @@ def eliminar_periodo(
         id_periodo: id del período a borrar.
         id_carrera: si se indica, borra solo esa carrera dentro del período.
 
+    Regla de dueño (app/api/permisos.py: puede_modificar_carga): un docente solo
+    borra lo que cargó él; un directivo o el admin, cualquier carga. Para borrar
+    el período completo hay que poder borrar TODAS sus carreras.
+
     Errors:
+        403: si alguna de las cargas a borrar es de otro usuario.
         404: si el período no existe.
     """
     periodo = queries.obtener_periodo(conn, id_periodo)
     if periodo is None:
         raise HTTPException(404, f"No existe el período con id {id_periodo}.")
 
-    queries.borrar_periodo(conn, id_periodo, id_carrera)
+    carreras = [id_carrera] if id_carrera is not None else queries.carreras_con_datos(conn, id_periodo)
+    for id_c in carreras:
+        if not P.puede_modificar_carga(usuario, queries.dueno_carga(conn, id_periodo, id_c)):
+            raise HTTPException(
+                403, "Solo podés borrar los datos que cargaste vos (o pedírselo a un directivo)."
+            )
+
+    queries.borrar_periodo(conn, id_periodo, id_carrera, borrado_por=usuario["sub"])
     return {"message": f"Datos del período '{periodo['label']}' eliminados."}
 
 
 @router.delete("/api/limpiar-db", response_model=MensajeOut)
 def limpiar_db(conn=Depends(get_db), usuario: dict = Depends(require_permiso(P.RESETEAR_DB))):
-    """Vacía todas las tablas de la base de datos (acción destructiva)."""
-    queries.vaciar_base(conn)
+    """Vacía los datos académicos (acción destructiva). El historial de cargas se conserva."""
+    queries.vaciar_base(conn, borrado_por=usuario["sub"])
     return {"message": "Base de datos reiniciada con éxito."}
