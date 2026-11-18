@@ -2,10 +2,10 @@
 import io, os, tempfile
 from pathlib import Path
  
-# La DB de prueba y la API key se definen ANTES de importar la app.
+# La DB de prueba y las variables de entorno se definen ANTES de importar la app.
 _tmp = tempfile.mkdtemp()
 os.environ["DB_PATH"] = str(Path(_tmp) / "test.db")
-os.environ["ADMIN_API_KEY"] = "secreta"
+os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-unit-tests-aaaabbbbccccdddd"
  
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +13,10 @@ from openpyxl import Workbook
  
 from app.api.main import app
  
-H = {"X-API-Key": "secreta"}
+# H se puebla con un token real por el fixture _populate_auth_headers antes de cualquier test.
+# Como es un dict mutable referenciado por subir(..., headers=H), la mutación es visible
+# en todos los tests sin cambiar sus firmas.
+H: dict = {}
  
  
 def excel(carrera_cod, carrera_nom, libres, promo, anio=2022, cuat="PRIMER CUATRIMESTRE 2022",
@@ -45,7 +48,16 @@ def subir(c, data, nombre="x.xlsx", headers=H):
 def c():
     with TestClient(app) as client:      # dispara el lifespan (init_db)
         yield client
- 
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _populate_auth_headers(c):
+    """Obtiene un token JWT real y puebla H para todos los tests del módulo."""
+    resp = c.post("/api/login", json={"usuario": "admin@unahur.edu.ar", "password": "Origone151"})
+    assert resp.status_code == 200, f"Login falló en setup: {resp.text}"
+    token = resp.json()["access_token"]
+    H.update({"Authorization": f"Bearer {token}"})
+
  
 def test_01_vacio(c):
     assert c.get("/api/periodos").json() == {"periodos": []}
@@ -118,9 +130,16 @@ def test_07_validaciones_de_upload(c):
  
  
 def test_08_auth_en_endpoints_destructivos(c):
+    # Sin header Authorization → 401
     assert subir(c, excel("023", "L", 1, 1), headers={}).status_code == 401
     assert c.delete("/api/limpiar-db").status_code == 401
-    assert c.delete("/api/limpiar-db", headers={"X-API-Key": "mala"}).status_code == 401
+    # Token inválido (manipulado) → 401
+    assert c.delete("/api/limpiar-db", headers={"Authorization": "Bearer token.invalido.xyz"}).status_code == 401
+    # Token válido → acceso permitido (200)
+    assert c.delete("/api/limpiar-db", headers=H).status_code == 200
+    # Tras vaciar la DB, re-cargar datos para que los tests siguientes tengan datos
+    subir(c, excel("023", "Licenciatura en Informática", libres=10, promo=20))
+    subir(c, excel("024", "Licenciatura en Sistemas", libres=99, promo=1))
     assert c.get("/api/periodos").status_code == 200       # lecturas siguen públicas
  
  

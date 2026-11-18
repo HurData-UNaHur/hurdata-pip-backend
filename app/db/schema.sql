@@ -101,3 +101,21 @@ CREATE INDEX IF NOT EXISTS idx_comision_materia
 CREATE INDEX IF NOT EXISTS idx_comision_modalidad
     ON Comision(id_modalidad);
 
+-- -----------------------------------------------------------------------------
+-- Autenticación
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS Usuario (
+    id_usuario      INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario         TEXT    NOT NULL UNIQUE,
+    nombre          TEXT    NOT NULL,
+    cargo           TEXT    NOT NULL,
+    role            TEXT    NOT NULL DEFAULT 'autorizado',
+    password_hash   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS Directivo (
+    id_directivo    INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre          TEXT    NOT NULL,
+    email           TEXT    NOT NULL UNIQUE
+);

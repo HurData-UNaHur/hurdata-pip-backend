@@ -27,9 +27,12 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import get_db
+from app.api.auth import validate_secret_key
 from app.api.routers import admin, consultas
+from app.api.routers import auth as auth_router
 from app.config import config
 from app.db.init_db import init_db
+from app.db.seed import seed_db
 
 # Muestra en consola los logs (incluidos los errores internos del ETL)
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +47,8 @@ async def lifespan(app: FastAPI):
     """Inicializa el esquema de la DB al arrancar FastAPI."""
     print("[API] Iniciando servidor HurData PIP...")
     init_db()
+    seed_db()
+    validate_secret_key()   # falla rápido si JWT_SECRET_KEY no está configurada
     yield
     print("[API] Servidor detenido.")
 
@@ -67,7 +72,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,                     # ej: Vite dev server (5173)
     allow_methods=["GET", "POST", "DELETE"],               # solo los métodos que usamos
-    allow_headers=["Content-Type", "X-API-Key"],           # X-API-Key: ver app/api/deps.py
+    allow_headers=["Content-Type", "Authorization"],           # Authorization: Bearer JWT
 )
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,7 @@ app.add_middleware(
 
 app.include_router(consultas.router)   # GET  → lectura (públicos)
 app.include_router(admin.router)       # POST/DELETE → modifican datos (protegidos)
+app.include_router(auth_router.router) # POST /api/login, GET /api/directivos
 
 
 # ---------------------------------------------------------------------------
