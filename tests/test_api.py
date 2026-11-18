@@ -1,10 +1,15 @@
 
-import io, os, tempfile
+import io, os
 from pathlib import Path
  
 # La DB de prueba y las variables de entorno se definen ANTES de importar la app.
-_tmp = tempfile.mkdtemp()
-os.environ["DB_PATH"] = str(Path(_tmp) / "test.db")
+# config.py solo acepta un NOMBRE de archivo (siempre en la raíz del proyecto, por
+# seguridad), así que la DB de prueba es <raíz>/test.db. Se borra al empezar para
+# que cada corrida arranque vacía y con el schema actual.
+_RAIZ = Path(__file__).resolve().parent.parent
+for _sufijo in ("", "-wal", "-shm"):
+    (_RAIZ / f"test.db{_sufijo}").unlink(missing_ok=True)
+os.environ["DB_PATH"] = "test.db"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-unit-tests-aaaabbbbccccdddd"
  
 import pytest
@@ -82,7 +87,7 @@ def test_03_listados(c):
     assert [x["label"] for x in p] == ["2022 - PRIMER CUATRIMESTRE"]
     car = c.get("/api/carreras", params={"periodo": p[0]["label"]}).json()["carreras"]
     assert [x["nombre"] for x in car] == ["Licenciatura en Informática", "Licenciatura en Sistemas"]
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     assert len(pc) == 2 and {"id_periodo", "id_carrera", "label", "nombre_carrera"} <= set(pc[0])
  
  
@@ -144,7 +149,7 @@ def test_08_auth_en_endpoints_destructivos(c):
  
  
 def test_09_borrar_una_carrera_no_toca_la_otra(c):
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     inf = next(x for x in pc if x["nombre_carrera"] == "Licenciatura en Informática")
     r = c.delete(f"/api/periodos/{inf['id_periodo']}", params={"id_carrera": inf["id_carrera"]}, headers=H)
     assert r.status_code == 200
@@ -155,7 +160,7 @@ def test_09_borrar_una_carrera_no_toca_la_otra(c):
  
  
 def test_10_borrar_ultima_carrera_borra_el_periodo_y_404(c):
-    pc = c.get("/api/periodos-carreras").json()["periodos"]
+    pc = c.get("/api/periodos-carreras", headers=H).json()["periodos"]
     assert len(pc) == 1
     c.delete(f"/api/periodos/{pc[0]['id_periodo']}", params={"id_carrera": pc[0]["id_carrera"]}, headers=H)
     assert c.get("/api/periodos").json()["periodos"] == []
@@ -190,3 +195,146 @@ def test_13_actividad_sin_codigo_se_informa_no_se_pierde_en_silencio(c):
     resumen = cargar_reporte(datos)
     assert resumen["actividades_omitidas"] == ["Sin código"]
     assert resumen["actividades_cargadas"] == 1
+
+
+def token_de(c, usuario: str) -> dict:
+    """Header Authorization con un JWT real del usuario precargado indicado."""
+    r = c.post("/api/login", json={"usuario": usuario, "password": "Origone151"})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def test_14_permisos_por_rol(c):
+    """Matriz de permisos (app/api/permisos.py) aplicada a los endpoints."""
+    import base64, json
+    docente = token_de(c, "docente@unahur.edu.ar")
+    no_docente = token_de(c, "nodocente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    # El JWT lleva el rol y los permisos para el frontend
+    payload_b64 = no_docente["Authorization"].split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)))
+    assert payload["role"] == "no_docente" and payload["permisos"] == []
+
+    # No Docente: solo ve
+    assert subir(c, excel("030", "Tecnicatura X", 1, 1), headers=no_docente).status_code == 403
+    assert c.delete("/api/periodos/1", headers=no_docente).status_code == 403
+    assert c.get("/api/periodos").status_code == 200
+
+    # Docente y Directivo cargan, pero no resetean la DB
+    assert subir(c, excel("031", "Tecnicatura Docente", 1, 1), headers=docente).status_code == 201
+    assert subir(c, excel("032", "Tecnicatura Directivo", 1, 1), headers=directivo).status_code == 201
+    assert c.delete("/api/limpiar-db", headers=docente).status_code == 403
+    assert c.delete("/api/limpiar-db", headers=directivo).status_code == 403
+
+    # Solo el admin resetea
+    assert c.delete("/api/limpiar-db", headers=H).status_code == 200
+
+
+def _crear_docente(email: str) -> None:
+    """Crea un segundo docente directo en la DB de prueba (el seed trae uno solo)."""
+    from app.api.auth import hashear_password
+    from app.db.connection import get_connection
+    conn = get_connection()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO Usuario (usuario, nombre, cargo, role, password_hash) "
+            "VALUES (?, 'Otro Docente', 'Docente', 'docente', ?)",
+            (email, hashear_password("Origone151")),
+        )
+    conn.close()
+
+
+def _fila(c, headers, carrera):
+    pc = c.get("/api/periodos-carreras", headers=headers).json()["periodos"]
+    return next(x for x in pc if x["nombre_carrera"] == carrera)
+
+
+def test_15_dueno_de_la_carga(c):
+    _crear_docente("otro.docente@unahur.edu.ar")
+    docente = token_de(c, "docente@unahur.edu.ar")
+    otro = token_de(c, "otro.docente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    # periodos-carreras requiere login
+    assert c.get("/api/periodos-carreras").status_code == 401
+
+    # El docente carga dos carreras: queda como dueño
+    assert subir(c, excel("040", "Carrera A", 5, 5), "a.xlsx", headers=docente).status_code == 201
+    assert subir(c, excel("041", "Carrera B", 5, 5), "b.xlsx", headers=docente).status_code == 201
+    fila_dueno = _fila(c, docente, "Carrera A")
+    assert fila_dueno["cargado_por"] == "Docente" and fila_dueno["puede_borrar"] is True
+    assert "dueno" not in fila_dueno                         # el email no se expone
+    fila_otro = _fila(c, otro, "Carrera A")
+    assert fila_otro["puede_borrar"] is False
+
+    # Otro docente NO puede recargar, borrar la carrera ni borrar el período completo
+    r = subir(c, excel("040", "Carrera A", 99, 1), headers=otro)
+    assert r.status_code == 403
+    assert libres_ingles(c.get("/api/datos", params={"periodo": "2022 - PRIMER CUATRIMESTRE",
+                                                     "carrera": "Carrera A"}).json()) == 5  # intacta
+    id_p, id_a = fila_dueno["id_periodo"], fila_dueno["id_carrera"]
+    assert c.delete(f"/api/periodos/{id_p}", params={"id_carrera": id_a}, headers=otro).status_code == 403
+    assert c.delete(f"/api/periodos/{id_p}", headers=otro).status_code == 403
+
+    # El dueño sí puede recargar (la carga anterior queda 'reemplazada')
+    assert subir(c, excel("040", "Carrera A", 7, 3), "a-v2.xlsx", headers=docente).status_code == 201
+
+    # El directivo puede borrar cargas de otros
+    assert c.delete(f"/api/periodos/{id_p}", params={"id_carrera": id_a}, headers=directivo).status_code == 200
+
+    # El historial conserva todo: estado, archivo, quién y quién dio de baja
+    from app.db.connection import get_connection
+    conn = get_connection()
+    filas = [dict(r) for r in conn.execute(
+        "SELECT nombre_archivo, usuario, estado, dado_de_baja_por FROM Carga "
+        "WHERE nombre_carrera = 'Carrera A' ORDER BY id_carga"
+    ).fetchall()]
+    conn.close()
+    assert filas == [
+        {"nombre_archivo": "a.xlsx", "usuario": "docente@unahur.edu.ar",
+         "estado": "reemplazada", "dado_de_baja_por": "docente@unahur.edu.ar"},
+        {"nombre_archivo": "a-v2.xlsx", "usuario": "docente@unahur.edu.ar",
+         "estado": "borrada", "dado_de_baja_por": "directivo@unahur.edu.ar"},
+    ]
+
+    # El reset (admin) marca las activas como borradas pero conserva el historial
+    assert c.delete("/api/limpiar-db", headers=H).status_code == 200
+    conn = get_connection()
+    activas = conn.execute("SELECT COUNT(*) FROM Carga WHERE estado = 'activa'").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM Carga").fetchone()[0]
+    conn.close()
+    assert activas == 0 and total > 0
+
+
+def test_16_historial_de_cargas(c):
+    docente = token_de(c, "docente@unahur.edu.ar")
+    no_docente = token_de(c, "nodocente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    assert c.get("/api/cargas").status_code == 401                     # requiere login
+    assert c.get("/api/cargas", headers=no_docente).status_code == 403  # No Docente no ve
+
+    # Docente: solo las suyas
+    d = c.get("/api/cargas", headers=docente).json()
+    assert d["ve_todas"] is False and d["cargas"]
+    assert {x["cargado_por"] for x in d["cargas"]} == {"Docente"}
+
+    # Directivo: todas (incluye las del docente y las del admin)
+    t = c.get("/api/cargas", headers=directivo).json()
+    assert t["ve_todas"] is True
+    assert {"Docente", "Admin"} <= {x["cargado_por"] for x in t["cargas"]}
+    assert len(t["cargas"]) > len(d["cargas"])
+
+    # Orden: la más reciente primero, con fecha ISO y nombre de archivo original
+    ids = [x["id_carga"] for x in t["cargas"]]
+    assert ids == sorted(ids, reverse=True)
+    reemplazada = next(x for x in t["cargas"] if x["nombre_archivo"] == "a.xlsx")
+    assert reemplazada["estado"] == "reemplazada" and reemplazada["fecha"].endswith("+00:00")
+    borrada = next(x for x in t["cargas"] if x["nombre_archivo"] == "a-v2.xlsx")
+    assert borrada["dado_de_baja_por"] == "Directivo"                   # nombre, no email
+
+    # Filtro por estado
+    solo_borradas = c.get("/api/cargas", params={"estado": "borrada"}, headers=directivo).json()["cargas"]
+    assert solo_borradas and {x["estado"] for x in solo_borradas} == {"borrada"}
+    assert c.get("/api/cargas", params={"estado": "otro"}, headers=directivo).status_code == 422

@@ -19,13 +19,15 @@ from app.db.init_db import init_db
 from app.config import config
 
 
-def ejecutar_etl(ruta_excel: Path | None = None) -> dict:
+def ejecutar_etl(ruta_excel: Path | None = None, carga: dict | None = None) -> dict:
     """
     Ejecuta el pipeline ETL completo: Extract → Transform → Load.
 
     Args:
         ruta_excel: ruta al archivo .xlsx a procesar. Si es None, usa el
                     valor configurado en .env (EXCEL_SIU_FILENAME).
+        carga:      quién sube y qué archivo (ver loader.cargar_reporte).
+                    None = carga por consola.
 
     Returns:
         dict con el resumen de la carga devuelto por cargar_reporte().
@@ -55,7 +57,7 @@ def ejecutar_etl(ruta_excel: Path | None = None) -> dict:
     # 3. LOAD — inicializar esquema si no existe y persistir en SQLite
     # ------------------------------------------------------------------
     init_db()  # Crea las tablas si no existen sin borrar los datos acumulados
-    resumen = cargar_reporte(datos)  # Reemplaza únicamente el período procesado
+    resumen = cargar_reporte(datos, carga)  # Reemplaza únicamente el período + carrera procesado
 
     return resumen
 

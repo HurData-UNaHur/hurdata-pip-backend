@@ -49,6 +49,8 @@ class PeriodoCarreraOut(BaseModel):
     id_carrera: int
     label: str              # label del período
     nombre_carrera: str
+    cargado_por: str | None # nombre de quien hizo la carga activa (None: sin carga registrada)
+    puede_borrar: bool      # si el usuario actual puede borrar o recargar esta carga
 
 
 class PeriodosCarrerasOut(BaseModel):
@@ -112,3 +114,27 @@ class DirectivoOut(BaseModel):
 
 class DirectivosOut(BaseModel):
     directivos: list[DirectivoOut]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/cargas  (historial de Excel cargados)
+# ---------------------------------------------------------------------------
+
+class CargaOut(BaseModel):
+    id_carga: int
+    fecha: str                      # ISO 8601 en UTC; el frontend la muestra en hora local
+    nombre_archivo: str             # nombre original del .xlsx
+    cargado_por: str                # nombre de quien lo subió
+    periodo_label: str
+    nombre_carrera: str
+    materias: int
+    comisiones: int
+    resultados: int
+    estado: str                     # 'activa' | 'reemplazada' | 'borrada'
+    dado_de_baja_por: str | None    # nombre de quien lo reemplazó o borró
+    fecha_baja: str | None
+
+
+class CargasOut(BaseModel):
+    cargas: list[CargaOut]
+    ve_todas: bool                  # False: el usuario solo ve sus propias cargas

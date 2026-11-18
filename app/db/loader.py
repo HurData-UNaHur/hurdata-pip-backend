@@ -33,6 +33,7 @@ Validación:
 
 import sqlite3
 
+from app.db import queries
 from app.db.connection import get_connection
 
 
@@ -193,11 +194,34 @@ def _validar_metadatos(datos: dict) -> None:
 # Función pública principal
 # ---------------------------------------------------------------------------
 
-def cargar_reporte(datos: dict) -> dict:
+class CargaNoAutorizada(Exception):
+    """El período + carrera ya tiene datos de otro usuario y quien sube no puede reemplazarlos."""
+
+
+# Quién hizo la carga cuando no viene de la API (ej. python -m app.etl.pipeline)
+_CARGA_SISTEMA = {
+    "usuario": "sistema",
+    "nombre_usuario": "Carga por consola",
+    "nombre_archivo": "(consola)",
+    "autorizar_reemplazo": lambda dueno: True,
+}
+
+
+def cargar_reporte(datos: dict, carga: dict | None = None) -> dict:
     """
-    Carga el dict jerárquico producido por ExcelTransformer en la DB SQLite.
+    Carga el dict jerárquico producido por ExcelTransformer en la DB SQLite
+    y registra la subida en el historial (tabla Carga).
 
     Args:
+        carga: quién sube y qué archivo. Si es None, se registra como carga del sistema.
+            {
+                "usuario": str,            # email (sub del JWT)
+                "nombre_usuario": str,
+                "nombre_archivo": str,     # nombre original del .xlsx
+                "autorizar_reemplazo": Callable[[str | None], bool],
+                    # recibe el email del dueño de los datos que se van a reemplazar
+                    # (None si no hay carga registrada) y decide si se permite.
+            }
         datos: dict con estructura:
             {
                 "año_academico": int,
@@ -235,8 +259,10 @@ def cargar_reporte(datos: dict) -> dict:
 
     Raises:
         ValueError: si faltan metadatos obligatorios o el Excel no tiene actividades.
+        CargaNoAutorizada: si ya hay datos de otro usuario y no se permite reemplazarlos.
     """
     _validar_metadatos(datos)
+    carga = carga or _CARGA_SISTEMA
     conn = get_connection()
 
     # Contadores para el resumen final
@@ -259,6 +285,20 @@ def cargar_reporte(datos: dict) -> dict:
             datos["codigo_carrera"],
             datos["nombre_carrera"]
         )
+
+        # Si ya hay datos de esta carrera en este período, solo se reemplazan si
+        # quien sube está autorizado (dueño de la carga, directivo o admin).
+        ya_hay_datos = conn.execute(
+            "SELECT 1 FROM Comision WHERE id_periodo = ? AND id_carrera = ? LIMIT 1",
+            (id_periodo, id_carrera),
+        ).fetchone() is not None
+        dueno = queries.dueno_carga(conn, id_periodo, id_carrera)
+        if (ya_hay_datos or dueno) and not carga["autorizar_reemplazo"](dueno):
+            raise CargaNoAutorizada(
+                "Ese período y carrera ya fueron cargados por otro usuario. "
+                "Solo quien lo cargó, un directivo o el admin pueden reemplazarlo."
+            )
+        queries.dar_de_baja_cargas(conn, "reemplazada", carga["usuario"], id_periodo, id_carrera)
 
         # Recargar un Excel REEMPLAZA lo que había de esa carrera en ese período
         # (borra comisiones; los resultados se van en cascada). No toca otras carreras.
@@ -318,6 +358,24 @@ def cargar_reporte(datos: dict) -> dict:
                     _upsert_resultado(conn, id_comision, id_estado, cantidad)
                     total_resultados += 1
 
+        # ------------------------------------------------------------------
+        # 6. Registrar la subida en el historial (misma transacción)
+        # ------------------------------------------------------------------
+        cur = conn.execute(
+            """
+            INSERT INTO Carga (fecha, nombre_archivo, usuario, nombre_usuario,
+                               id_periodo, id_carrera, periodo_label, nombre_carrera,
+                               materias, comisiones, resultados)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                queries.ahora_utc(), carga["nombre_archivo"], carga["usuario"], carga["nombre_usuario"],
+                id_periodo, id_carrera, f"{anio} - {cuatrimestre}", datos["nombre_carrera"],
+                len(datos.get("actividades", [])) - len(omitidas), total_comisiones, total_resultados,
+            ),
+        )
+        id_carga = cur.lastrowid
+
         conn.commit()
         print(f"[LOADER] ✅ Carga completada — {len(datos.get('actividades', [])) - len(omitidas)} materias, "
               f"{total_comisiones} comisiones, {total_resultados} resultados.")
@@ -330,6 +388,7 @@ def cargar_reporte(datos: dict) -> dict:
         conn.close()  # la conexión ya no es compartida: la cierra quien la abre
 
     return {
+        "id_carga": id_carga,
         "periodo": f"{anio} - {cuatrimestre}",
         "nombre_carrera": datos["nombre_carrera"],
         "actividades_omitidas": omitidas,

@@ -19,9 +19,10 @@ _DIRECTIVOS = [
 ]
 
 _USUARIOS = [
-    ("docente@unahur.edu.ar",    "Docente",    "Docente",       "autorizado"),
-    ("nodocente@unahur.edu.ar",  "Nodocente",  "Nodocente",     "autorizado"),
-    ("directivo@unahur.edu.ar",  "Directivo",  "Directivo",     "autorizado"),
+    # (usuario, nombre, cargo, role) — role debe ser uno de app/api/permisos.py:ROLES
+    ("docente@unahur.edu.ar",    "Docente",    "Docente",       "docente"),
+    ("nodocente@unahur.edu.ar",  "No Docente", "No Docente",    "no_docente"),
+    ("directivo@unahur.edu.ar",  "Directivo",  "Directivo",     "directivo"),
     ("admin@unahur.edu.ar",      "Admin",       "Desarrollador", "admin"),
 ]
 
