@@ -155,3 +155,26 @@ class CargaActivaResumenOut(BaseModel):
 
 class CargaActivaOut(BaseModel):
     carga: CargaActivaResumenOut | None   # None: ese período + carrera no tiene carga activa
+
+
+# ---------------------------------------------------------------------------
+# GET /api/evolucion  (totales por período para el gráfico de evolución)
+# ---------------------------------------------------------------------------
+
+class MateriaRefOut(BaseModel):
+    codigo: str
+    nombre: str
+
+
+class PeriodoEvolucionOut(BaseModel):
+    id_periodo: int
+    label: str                      # ej: '2023 - PRIMER CUATRIMESTRE'
+    anio: int
+    cuatrimestre: str
+    comisiones: int
+    estados: list[EstadoOut]        # alumnos por estado en el período (suma de comisiones)
+
+
+class EvolucionOut(BaseModel):
+    materias: list[MateriaRefOut]       # materias de la carrera (para el selector)
+    periodos: list[PeriodoEvolucionOut]  # del más viejo al más nuevo

@@ -8,6 +8,7 @@ gráficos del frontend.
     GET /api/carreras            → carreras con datos (filtrable por período)
     GET /api/periodos-carreras   → cada combinación período + carrera cargada (requiere login)
     GET /api/datos               → actividades, comisiones y resultados
+    GET /api/evolucion           → totales por período de una carrera o materia
 
 Cada función solo recibe los parámetros, llama a app/db/queries.py y devuelve
 el resultado; el SQL no vive acá.
@@ -17,7 +18,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import get_db, get_usuario_actual
 from app.api.permisos import puede_modificar_carga
-from app.api.schemas import CarrerasOut, DatosOut, PeriodosCarrerasOut, PeriodosOut
+from app.api.schemas import CarrerasOut, DatosOut, EvolucionOut, PeriodosCarrerasOut, PeriodosOut
 from app.db import queries
 
 # Todas las rutas de este archivo cuelgan de /api y se agrupan como "Consultas" en /docs
@@ -67,3 +68,20 @@ def datos(
 ):
     """Actividades, comisiones y resultados de una carrera en un período."""
     return queries.obtener_datos(conn, periodo, carrera)
+
+
+# ---------------------------------------------------------------------------
+# Evolución entre períodos
+# ---------------------------------------------------------------------------
+
+@router.get("/evolucion", response_model=EvolucionOut)
+def evolucion(
+    carrera: str = Query(..., description="Nombre exacto de la carrera"),
+    materia: str | None = Query(None, description="Código de materia (ej. '004'). Sin valor: toda la carrera"),
+    conn=Depends(get_db),
+):
+    """
+    Totales por estado en cada período de una carrera (o de una materia), del más
+    viejo al más nuevo. Público, como /api/datos: lo usa también el modo invitado.
+    """
+    return queries.evolucion(conn, carrera, materia)

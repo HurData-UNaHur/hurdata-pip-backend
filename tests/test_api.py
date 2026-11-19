@@ -447,3 +447,32 @@ def test_20_carga_activa_para_el_dashboard(c):
     # Sin carga activa → null
     sin = c.get("/api/carga-activa", params={**params, "carrera": "No existe"}, headers=no_docente)
     assert sin.status_code == 200 and sin.json() == {"carga": None}
+
+
+def test_21_evolucion_entre_periodos(c):
+    # Misma carrera en dos períodos (y la segunda carga no pisa la primera)
+    assert subir(c, excel("080", "Carrera E", libres=10, promo=30), "e22.xlsx").status_code == 201
+    assert subir(c, excel("080", "Carrera E", libres=25, promo=15, anio=2023,
+                          cuat="PRIMER CUATRIMESTRE 2023"), "e23.xlsx").status_code == 201
+
+    r = c.get("/api/evolucion", params={"carrera": "Carrera E"})   # público
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert [m["codigo"] for m in d["materias"]] == ["004", "007"]  # Inglés I, Programación I
+    assert [p["label"] for p in d["periodos"]] == ["2022 - PRIMER CUATRIMESTRE", "2023 - PRIMER CUATRIMESTRE"]
+
+    def estados(p):
+        return {e["estado"]: e["total_alumnos"] for e in p["estados"]}
+
+    # Toda la carrera: Inglés (libres/promo) + Programación (3 libres, 3 regulares)
+    assert estados(d["periodos"][0]) == {"Libre": 13, "Promocionó": 30, "Regular": 3}
+    assert estados(d["periodos"][1]) == {"Libre": 28, "Promocionó": 15, "Regular": 3}
+    assert d["periodos"][0]["comisiones"] == 2
+
+    # Una sola materia
+    m = c.get("/api/evolucion", params={"carrera": "Carrera E", "materia": "004"}).json()
+    assert [estados(p) for p in m["periodos"]] == [{"Libre": 10, "Promocionó": 30}, {"Libre": 25, "Promocionó": 15}]
+    assert all(p["comisiones"] == 1 for p in m["periodos"])
+
+    # Carrera sin datos
+    assert c.get("/api/evolucion", params={"carrera": "No existe"}).json() == {"materias": [], "periodos": []}

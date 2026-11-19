@@ -116,6 +116,81 @@ def listar_periodos_con_carreras(conn: sqlite3.Connection) -> list[dict]:
 # Dueño de cada carga (tabla Carga, ver schema.sql)
 # ---------------------------------------------------------------------------
 
+def evolucion(conn: sqlite3.Connection, carrera: str, materia: str | None = None) -> dict:
+    """
+    Totales por período de una carrera (o de una materia de esa carrera), del más
+    viejo al más nuevo, para el gráfico de evolución.
+
+    Args:
+        carrera: nombre exacto de la carrera.
+        materia: código de materia (ej. '004'). None = toda la carrera.
+
+    Retorna:
+        {
+            "materias": [{"codigo": str, "nombre": str}],   # para el selector (toda la carrera)
+            "periodos": [
+                {"id_periodo", "label", "anio", "cuatrimestre", "comisiones": int,
+                 "estados": [{"estado": str, "total_alumnos": int}]}
+            ]
+        }
+    Los porcentajes los calcula el frontend con la misma regla que el resto de la app.
+    """
+    materias = [dict(r) for r in conn.execute(
+        """
+        SELECT DISTINCT m.codigo, m.nombre
+        FROM Comision c
+        JOIN Carrera car ON car.id_carrera = c.id_carrera
+        JOIN Materia m   ON m.id_materia   = c.id_materia
+        WHERE car.nombre = ?
+        ORDER BY m.nombre
+        """,
+        (carrera,),
+    ).fetchall()]
+
+    filtro_materia = " AND m.codigo = ?" if materia else ""
+    params: tuple = (carrera, materia) if materia else (carrera,)
+
+    # Una fila por período (con cuántas comisiones tuvo)
+    periodos = {
+        r["id_periodo"]: {**dict(r), "estados": []}
+        for r in conn.execute(
+            f"""
+            SELECT p.id_periodo, p.label, p.anio, p.cuatrimestre,
+                   COUNT(DISTINCT c.id_comision) AS comisiones
+            FROM Comision c
+            JOIN Periodo p   ON p.id_periodo   = c.id_periodo
+            JOIN Carrera car ON car.id_carrera = c.id_carrera
+            JOIN Materia m   ON m.id_materia   = c.id_materia
+            WHERE car.nombre = ?{filtro_materia}
+            GROUP BY p.id_periodo
+            ORDER BY p.anio, p.cuatrimestre
+            """,
+            params,
+        ).fetchall()
+    }
+
+    # Alumnos por estado en cada período
+    for r in conn.execute(
+        f"""
+        SELECT c.id_periodo, e.nombre AS estado, SUM(rc.cantidad_alumnos) AS total_alumnos
+        FROM Comision c
+        JOIN Carrera car ON car.id_carrera = c.id_carrera
+        JOIN Materia m   ON m.id_materia   = c.id_materia
+        JOIN Resultado_Comision rc ON rc.id_comision = c.id_comision
+        JOIN Estado e    ON e.id_estado    = rc.id_estado
+        WHERE car.nombre = ?{filtro_materia}
+        GROUP BY c.id_periodo, e.nombre
+        ORDER BY e.nombre
+        """,
+        params,
+    ).fetchall():
+        periodos[r["id_periodo"]]["estados"].append(
+            {"estado": r["estado"], "total_alumnos": r["total_alumnos"]}
+        )
+
+    return {"materias": materias, "periodos": list(periodos.values())}
+
+
 def carga_activa_por_label(conn: sqlite3.Connection, periodo: str, carrera: str) -> dict | None:
     """
     Carga ACTIVA de un período (label) + carrera (nombre exacto): de qué Excel
