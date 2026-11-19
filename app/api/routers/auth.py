@@ -1,14 +1,14 @@
 """
 routers/auth.py
 ===============
-Endpoints de autenticación y datos de directivos.
+Endpoints de autenticación e institutos (selector del registro).
 """
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import crear_token, verificar_password
 from app.api.permisos import permisos_de
 from app.api.deps import get_db
-from app.api.schemas import DirectivosOut, LoginIn, TokenOut
+from app.api.schemas import InstitutosOut, LoginIn, TokenOut
 from app.db import queries
 
 router = APIRouter(tags=["Autenticación"])
@@ -45,7 +45,10 @@ def login(body: LoginIn, conn=Depends(get_db)):
     return {"access_token": token, "token_type": "bearer"}
 
 
-@router.get("/api/directivos", response_model=DirectivosOut)
-def directivos(conn=Depends(get_db)):
-    """Devuelve la lista de directivos (endpoint público)."""
-    return {"directivos": queries.listar_directivos(conn)}
+@router.get("/api/institutos", response_model=InstitutosOut)
+def institutos(conn=Depends(get_db)):
+    """
+    Institutos para el selector del registro (endpoint público).
+    Devuelve solo id y nombre: el email de cada dirección queda en el backend.
+    """
+    return {"institutos": queries.listar_institutos(conn)}

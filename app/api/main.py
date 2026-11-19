@@ -16,7 +16,7 @@ Endpoints disponibles en esta versión:
     DELETE /api/periodos/{id}           → borra un período (o una carrera dentro de él)
     DELETE /api/limpiar-db              → vacía la base de datos
     POST   /api/login                   → login, devuelve un JWT
-    GET    /api/directivos              → directivos aprobadores
+    GET    /api/institutos              → institutos para el registro (sin emails)
     GET    /api/cargas                  → historial de Excel cargados
 
 Los endpoints viven en app/api/routers/ (consultas.py y admin.py);
@@ -84,7 +84,7 @@ app.add_middleware(
 
 app.include_router(consultas.router)   # GET  → lectura (públicos)
 app.include_router(admin.router)       # POST/DELETE → modifican datos (protegidos)
-app.include_router(auth_router.router) # POST /api/login, GET /api/directivos
+app.include_router(auth_router.router) # POST /api/login, GET /api/institutos
 app.include_router(cargas.router)      # GET /api/cargas (historial, según permisos)
 
 

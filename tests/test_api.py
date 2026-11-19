@@ -338,3 +338,30 @@ def test_16_historial_de_cargas(c):
     solo_borradas = c.get("/api/cargas", params={"estado": "borrada"}, headers=directivo).json()["cargas"]
     assert solo_borradas and {x["estado"] for x in solo_borradas} == {"borrada"}
     assert c.get("/api/cargas", params={"estado": "otro"}, headers=directivo).status_code == 422
+
+
+def test_17_institutos_y_seed(c, monkeypatch):
+    from app.db import seed
+
+    # El selector del registro recibe solo id y nombre (sin emails, endpoint público)
+    r = c.get("/api/institutos")
+    assert r.status_code == 200
+    institutos = r.json()["institutos"]
+    assert [i["nombre"] for i in institutos] == [
+        "Tecnología e Ingeniería", "Salud Comunitaria", "Educación", "Biotecnología",
+    ]
+    assert all(set(i) == {"id", "nombre"} for i in institutos)
+    assert "@" not in r.text
+    assert c.get("/api/directivos").status_code == 404           # endpoint viejo eliminado
+
+    # Cambiar un nombre en seed.py se aplica al reiniciar (antes se ignoraba)
+    monkeypatch.setattr(seed, "_INSTITUTOS", [("Ingeniería", "ingenieria@unahur.edu.ar")] + seed._INSTITUTOS[1:])
+    seed.seed_db()
+    assert c.get("/api/institutos").json()["institutos"][0]["nombre"] == "Ingeniería"
+
+    # Un rol inválido en el seed frena el arranque con un mensaje claro
+    # (antes INSERT OR IGNORE lo salteaba en silencio y el usuario no existía)
+    roto = [(u, n, cg, "Directivo" if r == "directivo" else r) for u, n, cg, r in seed._USUARIOS]
+    monkeypatch.setattr(seed, "_USUARIOS", roto)
+    with pytest.raises(ValueError, match="rol 'Directivo' inválido para directivo@unahur.edu.ar"):
+        seed.seed_db()

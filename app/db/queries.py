@@ -365,12 +365,16 @@ def vaciar_base(conn: sqlite3.Connection, borrado_por: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Directivos
+# Institutos (tabla Directivo: un instituto + el email de su dirección)
 # ---------------------------------------------------------------------------
 
-def listar_directivos(conn: sqlite3.Connection) -> list[dict]:
-    """Devuelve todos los directivos cargados."""
+def listar_institutos(conn: sqlite3.Connection) -> list[dict]:
+    """
+    Institutos para el selector del registro: solo id y nombre.
+    El email de la dirección NO se devuelve: es para el envío interno de la
+    solicitud y no debe llegar al navegador (el endpoint es público).
+    """
     rows = conn.execute(
-        "SELECT id_directivo AS id, nombre, email FROM Directivo ORDER BY id_directivo"
+        "SELECT id_directivo AS id, nombre FROM Directivo ORDER BY id_directivo"
     ).fetchall()
     return [dict(r) for r in rows]

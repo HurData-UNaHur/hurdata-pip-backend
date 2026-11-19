@@ -116,10 +116,12 @@ CREATE TABLE IF NOT EXISTS Usuario (
     password_hash   TEXT    NOT NULL
 );
 
+-- Un instituto por fila, con el email de su dirección (quien aprueba los registros).
+-- El email es solo para uso interno: GET /api/institutos no lo devuelve.
 CREATE TABLE IF NOT EXISTS Directivo (
     id_directivo    INTEGER PRIMARY KEY AUTOINCREMENT,
-    nombre          TEXT    NOT NULL,
-    email           TEXT    NOT NULL UNIQUE
+    nombre          TEXT    NOT NULL,         -- nombre del instituto, ej: 'Tecnología e Ingeniería'
+    email           TEXT    NOT NULL UNIQUE   -- email de la dirección del instituto
 );
 
 -- -----------------------------------------------------------------------------

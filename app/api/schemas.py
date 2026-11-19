@@ -93,7 +93,7 @@ class MensajeOut(BaseModel):
     message: str
 
 # ---------------------------------------------------------------------------
-# POST /api/login  /  GET /api/directivos
+# POST /api/login  /  GET /api/institutos
 # ---------------------------------------------------------------------------
 
 class LoginIn(BaseModel):
@@ -106,14 +106,13 @@ class TokenOut(BaseModel):
     token_type: str
 
 
-class DirectivoOut(BaseModel):
+class InstitutoOut(BaseModel):
     id: int
-    nombre: str
-    email: str
+    nombre: str             # ej: 'Tecnología e Ingeniería' (sin email: no se expone)
 
 
-class DirectivosOut(BaseModel):
-    directivos: list[DirectivoOut]
+class InstitutosOut(BaseModel):
+    institutos: list[InstitutoOut]
 
 
 # ---------------------------------------------------------------------------
