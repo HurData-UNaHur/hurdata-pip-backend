@@ -6,7 +6,8 @@ Los reportes nativos del sistema (como las estadísticas de fin de cursada) suel
 * **Motor de Procesamiento Dinámico:** Limpia y normaliza automáticamente archivos Excel crudos del SIU, aislando los datos reales de los metadatos visuales.
 * **Arquitectura Modular Orientada a Objetos:** Código backend estructurado profesionalmente, separando responsabilidades para facilitar el testing, la escalabilidad y el trabajo ágil en equipo.
 * **Privacidad por Diseño (Privacy-First):** Configuración estricta de repositorios y entornos para garantizar que los archivos con datos sensibles de la universidad nunca se expongan en la nube pública.
-* **API RESTful:** Endpoints rápidos y documentados, organizados por responsabilidad (consultas vs. administración), con autenticación por API key para las operaciones que modifican datos.
+* **API RESTful:** Endpoints rápidos y documentados, organizados por responsabilidad (consultas vs. administración). Las operaciones que modifican datos exigen un usuario con sesión (JWT) y el permiso correspondiente a su rol.
+* **Roles y permisos:** cuatro roles (Admin, Directivo, Docente, No Docente) con permisos centralizados en un solo archivo, e historial de quién cargó cada Excel.
 
 ---
 
@@ -54,19 +55,23 @@ Crear un archivo `.env` en la raíz del proyecto (ya está excluido del reposito
 EXCEL_SIU_FILENAME=estadisticas de fin de cursada.xlsx
 DB_PATH=hurdata.db
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-ADMIN_API_KEY=
 MAX_UPLOAD_MB=10
+JWT_SECRET_KEY=<generar con: python -c "import secrets; print(secrets.token_hex(32))">
+SEED_DEFAULT_PASSWORD=
 ```
 
 | Variable | Descripción | Default |
 |---|---|---|
 | `EXCEL_SIU_FILENAME` | Nombre del Excel en `/files` para el pipeline por CLI | `estadisticas de fin de cursada.xlsx` |
-| `DB_PATH` | Ruta al archivo SQLite | `hurdata.db` (raíz del proyecto) |
-| `CORS_ORIGINS` | Orígenes permitidos para el frontend, separados por coma | `http://localhost:5173` |
-| `ADMIN_API_KEY` | Clave para los endpoints que modifican datos. Si se deja vacía, no se exige (modo desarrollo) | vacío |
+| `DB_PATH` | Nombre del archivo SQLite. Siempre se crea en la raíz del proyecto: si se pone una ruta, se usa solo el nombre | `hurdata.db` |
+| `CORS_ORIGINS` | Orígenes permitidos para el frontend, separados por coma | `http://localhost:5173,http://127.0.0.1:5173` |
 | `MAX_UPLOAD_MB` | Tamaño máximo de un Excel subido por `/upload` | `10` |
+| `JWT_SECRET_KEY` | Clave para firmar los tokens de sesión. **Obligatoria**: sin ella el servidor no arranca | sin valor |
+| `SEED_DEFAULT_PASSWORD` | Contraseña de los usuarios precargados (ver "Usuarios precargados") | definida en `app/config.py` |
 
-> **Producción:** definir siempre `ADMIN_API_KEY` con un valor secreto. Sin ella, cualquiera puede subir o borrar datos.
+> **Producción:** definir una `JWT_SECRET_KEY` propia y secreta, y cambiar `SEED_DEFAULT_PASSWORD`. El archivo `.env.example` sirve de plantilla.
+
+> La variable `ADMIN_API_KEY` y el header `X-API-Key` del esquema anterior ya no se usan: la protección de los endpoints ahora es por usuario y rol.
 
 ## Gestión de Archivos Sensibles (Inputs)
 Los reportes crudos del SIU Guaraní (archivos `.xlsx`) **NO** deben subirse a GitHub por cuestiones de privacidad de datos.
@@ -90,7 +95,7 @@ Output esperado:
 [EXTRACT] Leyendo datos desde: ...
 [TRANSFORM] 42 actividades y 113 comisiones procesadas.
 [DB] Esquema inicializado correctamente.
-[LOADER] ✅ Carga completada — 42 materias, 111 comisiones, 365 resultados.
+[LOADER] ✅ Carga completada — 42 materias, 113 comisiones, 371 resultados.
 ```
 
 La DB puede recargarse con el mismo Excel sin duplicar datos (las inserciones usan upsert).
@@ -105,25 +110,68 @@ El servidor queda disponible en `http://127.0.0.1:8000`.
 
 ### Endpoints disponibles
 
-#### Consultas (GET — públicos)
+Los endpoints protegidos esperan el header `Authorization: Bearer <token>`, con el token que devuelve `POST /api/login`. El token dura 8 horas.
+
+#### Públicos (sin sesión, para el modo invitado)
 
 | Método | URL | Descripción |
 |--------|-----|-------------|
 | `GET` | `/health` | Estado de la API y lista de tablas en la DB |
 | `GET` | `/api/periodos` | Períodos cargados, del más reciente al más antiguo |
 | `GET` | `/api/carreras?periodo=...` | Carreras con datos (filtrable por período) |
-| `GET` | `/api/periodos-carreras` | Cada combinación período + carrera cargada |
 | `GET` | `/api/datos?periodo=...&carrera=...` | Árbol actividades → comisiones → estados |
+| `GET` | `/api/evolucion?carrera=...&materia=...` | Estados por período de una carrera, o de una materia si se indica su código. Incluye la lista de materias de la carrera |
+| `GET` | `/api/institutos` | Institutos para el selector de registro (sin emails) |
+| `POST` | `/api/login` | Recibe `{usuario, password}` y devuelve `{access_token, token_type}` |
 
-#### Administración (POST / DELETE — requieren `X-API-Key` si está configurada)
+#### Con sesión
 
-| Método | URL | Descripción |
-|--------|-----|-------------|
-| `POST` | `/upload` | Carga un `.xlsx` del SIU y ejecuta el pipeline ETL completo |
-| `DELETE` | `/api/periodos/{id}?id_carrera=...` | Borra un período (o solo una carrera dentro de él) |
-| `DELETE` | `/api/limpiar-db` | Vacía toda la base de datos |
+| Método | URL | Permiso | Descripción |
+|--------|-----|---------|-------------|
+| `GET` | `/api/periodos-carreras` | cualquier usuario con sesión | Cada combinación período + carrera cargada |
+| `GET` | `/api/carga-activa?periodo=...&carrera=...` | cualquier usuario con sesión | Quién cargó los datos activos de ese período y carrera, y cuándo |
+| `GET` | `/api/cargas?estado=...` | `cargas:ver` | Historial de cargas (`activa`, `reemplazada` o `borrada`). Docente ve las suyas; Directivo y Admin, todas |
+| `POST` | `/upload` | `datos:cargar` | Carga un `.xlsx` del SIU y ejecuta el pipeline ETL. Con `?reemplaza={id_carga}` se sube una "nueva versión" de una carga activa (tiene que ser del mismo período y carrera) |
+| `DELETE` | `/api/periodos/{id}?id_carrera=...` | `datos:borrar` | Borra un período, o solo una carrera dentro de él. Docente solo puede borrar lo que cargó él |
+| `DELETE` | `/api/limpiar-db` | `db:resetear` | Vacía los datos académicos (el historial de cargas se conserva) |
 
-Los endpoints de administración esperan el header `X-API-Key: <valor>` cuando `ADMIN_API_KEY` está definida en `.env`.
+Si un `POST /upload` apunta a un período y carrera que ya tienen datos, los reemplaza, pero solo si quien sube es el dueño de esa carga, un Directivo o un Admin. En otro caso responde 403.
+
+### Roles y permisos
+
+Todo está en `app/api/permisos.py`: ahí se asignan los permisos a cada rol y es el único lugar a tocar para cambiarlos.
+
+| Permiso | Admin | Directivo | Docente | No Docente |
+|---|:-:|:-:|:-:|:-:|
+| `datos:cargar` (subir Excel) | ✅ | ✅ | ✅ | ❌ |
+| `datos:borrar` (borrar lo propio) | ✅ | ✅ | ✅ | ❌ |
+| `datos:borrar_cualquiera` | ✅ | ✅ | ❌ | ❌ |
+| `cargas:ver` (historial propio) | ✅ | ✅ | ✅ | ❌ |
+| `cargas:ver_todas` | ✅ | ✅ | ❌ | ❌ |
+| `registros:aprobar` | ✅ | ✅ | ❌ | ❌ |
+| `db:resetear` | ✅ | ❌ | ❌ | ❌ |
+| `usuarios:gestionar` | ✅ | ❌ | ❌ | ❌ |
+
+Ver los datos (períodos, carreras, datos, evolución) no requiere permiso. El usuario **No Docente** solo consulta.
+
+Los permisos `registros:aprobar` y `usuarios:gestionar` están definidos, pero todavía no hay endpoints que los usen (registro de usuarios y recuperación de contraseña quedan pendientes).
+
+### Usuarios precargados
+
+En cada arranque, `app/db/seed.py` crea (si no existen) los institutos y estos usuarios, todos con la contraseña de `SEED_DEFAULT_PASSWORD`:
+
+| Usuario | Rol |
+|---|---|
+| `admin@unahur.edu.ar` | Admin |
+| `directivo@unahur.edu.ar` | Directivo |
+| `docente@unahur.edu.ar` | Docente |
+| `nodocente@unahur.edu.ar` | No Docente |
+
+Los usuarios que ya existen no se pisan al reiniciar. Los institutos se identifican por email: si se cambia un nombre en `seed.py`, se actualiza en la base. Si un rol del seed no es válido, el servidor no arranca.
+
+### Historial de cargas
+
+Cada subida de un Excel queda registrada en la tabla `Carga`: quién la hizo, cuándo, el nombre del archivo y cuántas materias, comisiones y resultados tenía. Para cada período y carrera hay como mucho una carga `activa`, y su autor es el dueño de esos datos. Al recargar, la anterior pasa a `reemplazada`. Al borrar, pasa a `borrada`. El historial sobrevive al borrado de los datos y el archivo en sí no se guarda.
 
 ### Documentación interactiva (Swagger)
 
@@ -202,17 +250,23 @@ hurdata-pip-backend/
 ├── app/
 │   ├── api/
 │   │   ├── main.py              # FastAPI: app, CORS, lifespan, router de /health
-│   │   ├── deps.py              # Dependencias reutilizables: get_db, require_admin
+│   │   ├── auth.py              # JWT: crear y validar tokens, hash de contraseñas
+│   │   ├── permisos.py          # Qué puede hacer cada rol (único lugar donde se asignan)
+│   │   ├── deps.py              # Dependencias: get_db, get_usuario_actual, require_permiso
 │   │   ├── schemas.py           # Modelos Pydantic de entrada/salida
 │   │   └── routers/
-│   │       ├── consultas.py     # GET /api/... → endpoints de lectura (públicos)
-│   │       └── admin.py         # POST /upload, DELETE /api/... → endpoints que modifican datos (protegidos)
+│   │       ├── consultas.py     # GET de períodos, carreras, datos y evolución
+│   │       ├── auth.py          # POST /api/login, GET /api/institutos
+│   │       ├── cargas.py        # GET /api/cargas, /api/carga-activa (historial)
+│   │       └── admin.py         # POST /upload, DELETE /api/... (piden permiso)
 │   ├── db/
-│   │   ├── schema.sql           # Definición del DER (8 tablas)
+│   │   ├── schema.sql           # Definición del DER (tablas académicas, Usuario, Directivo y Carga)
 │   │   ├── connection.py        # get_connection(): una conexión SQLite nueva por request
 │   │   ├── init_db.py           # Inicializa tablas al arrancar
+│   │   ├── seed.py              # Institutos y usuarios precargados (se corre en cada arranque)
+│   │   ├── reset_db.py          # Vacía las tablas académicas
 │   │   ├── loader.py            # Persiste el dict del ETL en la DB
-│   │   └── queries.py           # Todo el SQL de lectura y borrado de la API
+│   │   └── queries.py           # Todo el SQL de la API
 │   ├── etl/
 │   │   ├── extractor.py         # Lee el Excel del SIU
 │   │   ├── transformer.py       # Convierte el DataFrame a dict jerárquico
@@ -231,7 +285,11 @@ hurdata-pip-backend/
 
 ## Decisiones de arquitectura relevantes
 
-**Separación consultas / administración:** los endpoints de lectura (`routers/consultas.py`) son públicos y sin estado. Los que modifican datos (`routers/admin.py`) están agrupados en un router separado con autenticación por `X-API-Key`, lo que permite protegerlos en producción con un único punto de control.
+**Separación consultas / administración:** los endpoints de lectura de datos (`routers/consultas.py`) son públicos para que funcione el modo invitado del frontend. Los que modifican datos (`routers/admin.py`) piden un JWT y un permiso.
+
+**Permisos, no roles:** cada endpoint declara el permiso que necesita con `Depends(require_permiso(...))` y nunca pregunta por un rol. La tabla de qué rol tiene qué permiso vive solo en `app/api/permisos.py`.
+
+**Dueño de la carga:** el historial (`Carga`) guarda quién subió los datos de cada período y carrera. Un Docente solo puede borrar o reemplazar lo que cargó él. Directivo y Admin pueden con cualquier carga.
 
 **Una conexión por request:** `get_connection()` abre una conexión nueva en cada llamada. `deps.get_db()` la entrega al endpoint y la cierra garantizadamente al terminar (incluso si hubo error), evitando los problemas de concurrencia del patrón singleton anterior.
 
