@@ -140,3 +140,18 @@ class CargaOut(BaseModel):
 class CargasOut(BaseModel):
     cargas: list[CargaOut]
     ve_todas: bool                  # False: el usuario solo ve sus propias cargas
+
+
+# ---------------------------------------------------------------------------
+# GET /api/carga-activa  (de qué Excel salen los datos del dashboard)
+# ---------------------------------------------------------------------------
+
+class CargaActivaResumenOut(BaseModel):
+    id_carga: int
+    fecha: str                      # ISO 8601 en UTC
+    nombre_archivo: str
+    cargado_por: str                # nombre (no email)
+
+
+class CargaActivaOut(BaseModel):
+    carga: CargaActivaResumenOut | None   # None: ese período + carrera no tiene carga activa

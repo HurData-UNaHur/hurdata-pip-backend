@@ -426,3 +426,24 @@ def test_19_nueva_version_de_una_carga(c):
     # La carga reemplazada ya no se puede usar como referencia
     assert nueva_version(excel("060", "Carrera V", 1, 1), "v3.xlsx", v1["id_carga"]).status_code == 409
     assert nueva_version(excel("060", "Carrera V", 1, 1), "v3.xlsx", 999999).status_code == 409
+
+
+def test_20_carga_activa_para_el_dashboard(c):
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+    no_docente = token_de(c, "nodocente@unahur.edu.ar")
+    assert subir(c, excel("070", "Carrera O", 5, 5), "origen.xlsx", headers=directivo).status_code == 201
+    params = {"periodo": "2022 - PRIMER CUATRIMESTRE", "carrera": "Carrera O"}
+
+    # Requiere login (el invitado no ve quién cargó)
+    assert c.get("/api/carga-activa", params=params).status_code == 401
+
+    # Cualquier usuario logueado la ve, aunque no tenga permisos de carga
+    r = c.get("/api/carga-activa", params=params, headers=no_docente)
+    assert r.status_code == 200
+    carga = r.json()["carga"]
+    assert carga["nombre_archivo"] == "origen.xlsx" and carga["cargado_por"] == "Directivo"
+    assert set(carga) == {"id_carga", "fecha", "nombre_archivo", "cargado_por"}   # sin emails
+
+    # Sin carga activa → null
+    sin = c.get("/api/carga-activa", params={**params, "carrera": "No existe"}, headers=no_docente)
+    assert sin.status_code == 200 and sin.json() == {"carga": None}

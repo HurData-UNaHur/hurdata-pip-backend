@@ -116,6 +116,25 @@ def listar_periodos_con_carreras(conn: sqlite3.Connection) -> list[dict]:
 # Dueño de cada carga (tabla Carga, ver schema.sql)
 # ---------------------------------------------------------------------------
 
+def carga_activa_por_label(conn: sqlite3.Connection, periodo: str, carrera: str) -> dict | None:
+    """
+    Carga ACTIVA de un período (label) + carrera (nombre exacto): de qué Excel
+    salen los datos que muestra el dashboard. None si no hay.
+    Se busca por los ids actuales de Periodo y Carrera, no por el texto guardado en Carga.
+    """
+    row = conn.execute(
+        """
+        SELECT cg.id_carga, cg.fecha, cg.nombre_archivo, cg.nombre_usuario AS cargado_por
+        FROM Carga cg
+        JOIN Periodo p   ON p.id_periodo   = cg.id_periodo
+        JOIN Carrera car ON car.id_carrera = cg.id_carrera
+        WHERE cg.estado = 'activa' AND p.label = ? AND car.nombre = ?
+        """,
+        (periodo, carrera),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def obtener_carga(conn: sqlite3.Connection, id_carga: int) -> dict | None:
     """Una carga del historial por id (estado, período y carrera), o None si no existe."""
     row = conn.execute(

@@ -4,6 +4,7 @@ cargas.py
 Responsabilidad: consultar el historial de Excel cargados (tabla Carga).
 
     GET /api/cargas?estado=...   → historial de cargas          (cargas:ver)
+    GET /api/carga-activa        → de qué Excel salen los datos (requiere login)
 
 Alcance según permisos (app/api/permisos.py):
     • cargas:ver_todas (Admin, Directivo) → todas las cargas.
@@ -16,8 +17,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query
 
 from app.api import permisos as P
-from app.api.deps import get_db, require_permiso
-from app.api.schemas import CargasOut
+from app.api.deps import get_db, get_usuario_actual, require_permiso
+from app.api.schemas import CargaActivaOut, CargasOut
 from app.db import queries
 
 router = APIRouter(prefix="/api", tags=["Historial de cargas"])
@@ -44,3 +45,17 @@ def historial_cargas(
         dueno = c.pop("dueno")  # el email no se expone
         c["puede_borrar"] = c["estado"] == "activa" and P.puede_modificar_carga(usuario, dueno)
     return {"cargas": cargas, "ve_todas": solo_de is None}
+
+
+@router.get("/carga-activa", response_model=CargaActivaOut)
+def carga_activa(
+    periodo: str = Query(..., description="Ej: '2022 - PRIMER CUATRIMESTRE'"),
+    carrera: str = Query(..., description="Nombre exacto de la carrera"),
+    conn=Depends(get_db),
+    usuario: dict = Depends(get_usuario_actual),
+):
+    """
+    De qué Excel salen los datos de un período + carrera (archivo, quién y cuándo).
+    Requiere login: el modo invitado no ve quién cargó cada Excel.
+    """
+    return {"carga": queries.carga_activa_por_label(conn, periodo, carrera)}
