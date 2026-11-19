@@ -116,6 +116,18 @@ def listar_periodos_con_carreras(conn: sqlite3.Connection) -> list[dict]:
 # Dueño de cada carga (tabla Carga, ver schema.sql)
 # ---------------------------------------------------------------------------
 
+def obtener_carga(conn: sqlite3.Connection, id_carga: int) -> dict | None:
+    """Una carga del historial por id (estado, período y carrera), o None si no existe."""
+    row = conn.execute(
+        """
+        SELECT id_carga, estado, id_periodo, id_carrera, periodo_label, nombre_carrera
+        FROM Carga WHERE id_carga = ?
+        """,
+        (id_carga,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def dueno_carga(conn: sqlite3.Connection, id_periodo: int, id_carrera: int) -> str | None:
     """Email de quien hizo la carga ACTIVA de ese período + carrera, o None si no hay."""
     row = conn.execute(
@@ -320,10 +332,12 @@ def listar_cargas(
         estado:  'activa' | 'reemplazada' | 'borrada'; None = todas.
 
     Retorna una lista de dicts con los campos de Carga más el NOMBRE de quien
-    la dio de baja (no el email).
+    la dio de baja (no el email). Incluye 'dueno' (email de quien la subió) para
+    que el router calcule permisos; el router no lo expone.
     """
     sql = """
         SELECT cg.id_carga, cg.fecha, cg.nombre_archivo, cg.nombre_usuario AS cargado_por,
+               cg.usuario AS dueno, cg.id_periodo, cg.id_carrera,
                cg.periodo_label, cg.nombre_carrera, cg.materias, cg.comisiones, cg.resultados,
                cg.estado, COALESCE(u.nombre, cg.dado_de_baja_por) AS dado_de_baja_por, cg.fecha_baja
         FROM Carga cg

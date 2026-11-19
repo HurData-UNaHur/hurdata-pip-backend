@@ -40,6 +40,10 @@ _XLSX_MAGIC = b"PK\x03\x04"
 @router.post("/upload", tags=["ETL"], status_code=201)
 def upload_excel(
     archivo: UploadFile = File(...),
+    reemplaza: int | None = Query(
+        None, description="id_carga activa que se reemplaza con este Excel ('Nueva versión')."
+    ),
+    conn=Depends(get_db),
     usuario: dict = Depends(require_permiso(P.CARGAR)),
 ):
     """
@@ -47,19 +51,31 @@ def upload_excel(
     (Extract → Transform → Load) y persiste los datos en la DB.
 
     Args:
-        archivo: archivo .xlsx enviado como form-data (campo 'archivo').
+        archivo:   archivo .xlsx enviado como form-data (campo 'archivo').
+        reemplaza: opcional. Si se indica, el Excel TIENE que ser del mismo
+                   período y carrera que esa carga; si no, se rechaza (422).
 
     Returns:
         Resumen de la carga con cantidades de materias, comisiones y resultados.
 
     Errors:
         400: si el archivo no es un .xlsx válido
+        403: si el período + carrera ya tiene datos de otro usuario
+        409: si la carga a reemplazar no existe o ya no está activa
         413: si el archivo supera MAX_UPLOAD_MB
-        422: si el Excel no tiene el formato esperado del SIU
+        422: si el Excel no tiene el formato esperado del SIU, o no corresponde
+             a la carga que se quiere reemplazar
         500: si el pipeline falla por un error interno
     """
     # `def` (no `async def`): FastAPI lo corre en un thread aparte y no bloquea
     # al resto de la API mientras pandas y SQLite trabajan.
+
+    # 'Nueva versión': la carga a reemplazar tiene que seguir activa
+    esperado = None
+    if reemplaza is not None:
+        esperado = queries.obtener_carga(conn, reemplaza)
+        if esperado is None or esperado["estado"] != "activa":
+            raise HTTPException(409, "Esa carga ya no está activa. Actualizá la página e intentá de nuevo.")
 
     # Validar extensión
     if not archivo.filename or not archivo.filename.lower().endswith(".xlsx"):
@@ -91,6 +107,8 @@ def upload_excel(
             "nombre_archivo": Path(archivo.filename).name[:200],
             # Recargar datos que ya existen: solo el dueño, un directivo o el admin
             "autorizar_reemplazo": lambda dueno: P.puede_modificar_carga(usuario, dueno),
+            # Si es 'Nueva versión', el Excel tiene que ser de este período + carrera
+            "esperado": esperado,
         }
         resumen = ejecutar_etl(ruta_excel=ruta_tmp, carga=carga)
     except HTTPException:

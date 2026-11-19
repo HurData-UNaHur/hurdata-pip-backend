@@ -124,6 +124,8 @@ class CargaOut(BaseModel):
     fecha: str                      # ISO 8601 en UTC; el frontend la muestra en hora local
     nombre_archivo: str             # nombre original del .xlsx
     cargado_por: str                # nombre de quien lo subió
+    id_periodo: int                 # para borrar: DELETE /api/periodos/{id_periodo}?id_carrera=...
+    id_carrera: int
     periodo_label: str
     nombre_carrera: str
     materias: int
@@ -132,6 +134,7 @@ class CargaOut(BaseModel):
     estado: str                     # 'activa' | 'reemplazada' | 'borrada'
     dado_de_baja_por: str | None    # nombre de quien lo reemplazó o borró
     fecha_baja: str | None
+    puede_borrar: bool              # solo cargas activas, con la regla de dueño
 
 
 class CargasOut(BaseModel):

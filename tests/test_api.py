@@ -365,3 +365,64 @@ def test_17_institutos_y_seed(c, monkeypatch):
     monkeypatch.setattr(seed, "_USUARIOS", roto)
     with pytest.raises(ValueError, match="rol 'Directivo' inválido para directivo@unahur.edu.ar"):
         seed.seed_db()
+
+
+def test_18_historial_indica_que_se_puede_borrar(c):
+    """La página Cargas borra desde el historial: cada fila trae ids y puede_borrar."""
+    _crear_docente("otro.docente@unahur.edu.ar")
+    docente = token_de(c, "docente@unahur.edu.ar")
+    otro = token_de(c, "otro.docente@unahur.edu.ar")
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+
+    assert subir(c, excel("050", "Carrera H", 5, 5), "h.xlsx", headers=docente).status_code == 201
+    assert subir(c, excel("050", "Carrera H", 6, 4), "h-v2.xlsx", headers=docente).status_code == 201
+
+    def fila(headers, archivo):
+        return next(x for x in c.get("/api/cargas", headers=headers).json()["cargas"]
+                    if x["nombre_archivo"] == archivo)
+
+    activa = fila(docente, "h-v2.xlsx")
+    assert activa["estado"] == "activa" and activa["puede_borrar"] is True
+    assert {"id_periodo", "id_carrera"} <= set(activa) and "dueno" not in activa
+    assert fila(docente, "h.xlsx")["puede_borrar"] is False             # reemplazada: no se borra
+    assert fila(directivo, "h-v2.xlsx")["puede_borrar"] is True         # directivo: cualquiera
+    assert not any(x["nombre_archivo"] == "h-v2.xlsx"                   # otro docente no la ve
+                   for x in c.get("/api/cargas", headers=otro).json()["cargas"])
+
+    # Borrar con los ids del historial
+    r = c.delete(f"/api/periodos/{activa['id_periodo']}",
+                 params={"id_carrera": activa["id_carrera"]}, headers=docente)
+    assert r.status_code == 200
+    borrada = fila(docente, "h-v2.xlsx")
+    assert borrada["estado"] == "borrada" and borrada["puede_borrar"] is False
+
+
+def test_19_nueva_version_de_una_carga(c):
+    docente = token_de(c, "docente@unahur.edu.ar")
+    assert subir(c, excel("060", "Carrera V", 5, 5), "v1.xlsx", headers=docente).status_code == 201
+
+    def carga(archivo):
+        return next(x for x in c.get("/api/cargas", headers=docente).json()["cargas"]
+                    if x["nombre_archivo"] == archivo)
+
+    v1 = carga("v1.xlsx")
+
+    def nueva_version(data, nombre, id_carga):
+        return c.post("/upload", params={"reemplaza": id_carga},
+                      files={"archivo": (nombre, data)}, headers=docente)
+
+    # Excel de OTRA carrera: se rechaza y no se crea nada
+    r = nueva_version(excel("061", "Carrera W", 1, 1), "w.xlsx", v1["id_carga"])
+    assert r.status_code == 422 and "Carrera W" in r.json()["detail"] and "Carrera V" in r.json()["detail"]
+    nombres = {x["nombre_archivo"] for x in c.get("/api/cargas", headers=docente).json()["cargas"]}
+    assert "w.xlsx" not in nombres
+    assert carga("v1.xlsx")["estado"] == "activa"
+
+    # Mismo período + carrera: reemplaza
+    assert nueva_version(excel("060", "Carrera V", 9, 1), "v2.xlsx", v1["id_carga"]).status_code == 201
+    assert carga("v1.xlsx")["estado"] == "reemplazada"
+    assert carga("v2.xlsx")["estado"] == "activa"
+
+    # La carga reemplazada ya no se puede usar como referencia
+    assert nueva_version(excel("060", "Carrera V", 1, 1), "v3.xlsx", v1["id_carga"]).status_code == 409
+    assert nueva_version(excel("060", "Carrera V", 1, 1), "v3.xlsx", 999999).status_code == 409

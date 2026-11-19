@@ -221,6 +221,8 @@ def cargar_reporte(datos: dict, carga: dict | None = None) -> dict:
                 "autorizar_reemplazo": Callable[[str | None], bool],
                     # recibe el email del dueño de los datos que se van a reemplazar
                     # (None si no hay carga registrada) y decide si se permite.
+                "esperado": dict | None,   # opcional ('Nueva versión'): id_periodo, id_carrera,
+                                           # periodo_label y nombre_carrera de la carga a reemplazar
             }
         datos: dict con estructura:
             {
@@ -285,6 +287,16 @@ def cargar_reporte(datos: dict, carga: dict | None = None) -> dict:
             datos["codigo_carrera"],
             datos["nombre_carrera"]
         )
+
+        # 'Nueva versión' de una carga: el Excel tiene que ser del mismo período + carrera.
+        # Si no coincide se rechaza (rollback), en vez de crear una carga distinta.
+        esperado = carga.get("esperado")
+        if esperado and (id_periodo, id_carrera) != (esperado["id_periodo"], esperado["id_carrera"]):
+            raise ValueError(
+                f"Este Excel es de {anio} - {cuatrimestre} · {datos['nombre_carrera']}, "
+                f"pero la carga que querés reemplazar es de "
+                f"{esperado['periodo_label']} · {esperado['nombre_carrera']}."
+            )
 
         # Si ya hay datos de esta carrera en este período, solo se reemplazan si
         # quien sube está autorizado (dueño de la carga, directivo o admin).

@@ -31,9 +31,16 @@ def historial_cargas(
     conn=Depends(get_db),
     usuario: dict = Depends(require_permiso(P.VER_CARGAS)),
 ):
-    """Historial de Excel cargados, el más reciente primero."""
+    """
+    Historial de Excel cargados, el más reciente primero.
+
+    Cada fila indica 'puede_borrar': solo las cargas ACTIVAS se pueden borrar,
+    y con la regla de dueño (app/api/permisos.py: puede_modificar_carga).
+    Para borrar se usa DELETE /api/periodos/{id_periodo}?id_carrera=...
+    """
     solo_de = None if P.VER_TODAS_LAS_CARGAS in usuario["permisos"] else usuario["sub"]
-    return {
-        "cargas": queries.listar_cargas(conn, usuario=solo_de, estado=estado),
-        "ve_todas": solo_de is None,
-    }
+    cargas = queries.listar_cargas(conn, usuario=solo_de, estado=estado)
+    for c in cargas:
+        dueno = c.pop("dueno")  # el email no se expone
+        c["puede_borrar"] = c["estado"] == "activa" and P.puede_modificar_carga(usuario, dueno)
+    return {"cargas": cargas, "ve_todas": solo_de is None}
