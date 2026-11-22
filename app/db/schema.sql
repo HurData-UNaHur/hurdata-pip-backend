@@ -182,13 +182,28 @@ CREATE TABLE IF NOT EXISTS Solicitud_Registro (
 
 
 -- -----------------------------------------------------------------------------
--- Recuperación de contraseña (códigos temporales de 6 dígitos)
+-- Recuperación de contraseña por solicitud
 -- -----------------------------------------------------------------------------
+-- El usuario pide la recuperación; un Directivo o Admin la aprueba y recibe un código
+-- de un solo uso que le entrega al usuario. El código se guarda hasheado.
+--   pendiente  → esperando que alguien la apruebe
+--   aprobada   → tiene código vigente (codigo_hash y expira_en)
+--   usada      → el código se canjeó y la contraseña se cambió
+--   rechazada  → la rechazó un aprobador, o se agotaron los intentos del código
 
-CREATE TABLE IF NOT EXISTS Recuperacion_Password (
-    id_recuperacion INTEGER PRIMARY KEY AUTOINCREMENT,
-    usuario         TEXT    NOT NULL REFERENCES Usuario(usuario) ON DELETE CASCADE,
-    codigo          TEXT    NOT NULL,
-    expira_en       TEXT    NOT NULL,         
-    usado           INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS Solicitud_Recuperacion (
+    id_solicitud     INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario          TEXT    NOT NULL REFERENCES Usuario(usuario) ON DELETE CASCADE,
+    estado           TEXT    NOT NULL DEFAULT 'pendiente'
+                     CHECK (estado IN ('pendiente', 'aprobada', 'usada', 'rechazada')),
+    fecha_solicitud  TEXT    NOT NULL,
+    codigo_hash      TEXT,
+    expira_en        TEXT,
+    intentos         INTEGER NOT NULL DEFAULT 0,
+    resuelto_por     TEXT,
+    fecha_resolucion TEXT
 );
+
+-- Como mucho una solicitud abierta (pendiente o con código vigente) por usuario
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recuperacion_abierta
+    ON Solicitud_Recuperacion(usuario) WHERE estado IN ('pendiente', 'aprobada');

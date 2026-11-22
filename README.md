@@ -112,7 +112,7 @@ El servidor queda disponible en `http://127.0.0.1:8000`.
 
 Los endpoints protegidos esperan el header `Authorization: Bearer <token>`, con el token que devuelve `POST /api/login`. El token dura 8 horas.
 
-#### Públicos (sin sesión, para el modo invitado)
+#### Públicos (sin sesión)
 
 | Método | URL | Descripción |
 |--------|-----|-------------|
@@ -123,6 +123,9 @@ Los endpoints protegidos esperan el header `Authorization: Bearer <token>`, con 
 | `GET` | `/api/evolucion?carrera=...&materia=...` | Estados por período de una carrera, o de una materia si se indica su código. Incluye la lista de materias de la carrera |
 | `GET` | `/api/institutos` | Institutos para el selector de registro (sin emails) |
 | `POST` | `/api/login` | Recibe `{usuario, password}` y devuelve `{access_token, token_type}` |
+| `POST` | `/api/registro/solicitar` | Pide el alta de un usuario (correo `@unahur.edu.ar`, rol, instituto y contraseña). Queda pendiente de aprobación |
+| `POST` | `/api/recuperar-password/solicitar` | Pide la recuperación de contraseña. Responde lo mismo exista o no el correo |
+| `POST` | `/api/recuperar-password/canjear` | Cambia la contraseña con un código aprobado: `{usuario, codigo, nueva_password}` |
 
 #### Con sesión
 
@@ -134,6 +137,10 @@ Los endpoints protegidos esperan el header `Authorization: Bearer <token>`, con 
 | `POST` | `/upload` | `datos:cargar` | Carga un `.xlsx` del SIU y ejecuta el pipeline ETL. Con `?reemplaza={id_carga}` se sube una "nueva versión" de una carga activa (tiene que ser del mismo período y carrera) |
 | `DELETE` | `/api/periodos/{id}?id_carrera=...` | `datos:borrar` | Borra un período, o solo una carrera dentro de él. Docente solo puede borrar lo que cargó él |
 | `DELETE` | `/api/limpiar-db` | `db:resetear` | Vacía los datos académicos (el historial de cargas se conserva) |
+| `GET` | `/api/registro/solicitudes` | `registros:aprobar` | Solicitudes de alta pendientes |
+| `POST` | `/api/registro/solicitudes/{id}/{aprobar\|rechazar}` | `registros:aprobar` | Aprueba (con el rol a asignar, opcional) o rechaza una solicitud de alta |
+| `GET` | `/api/recuperacion/solicitudes` | `registros:aprobar` | Solicitudes de recuperación pendientes |
+| `POST` | `/api/recuperacion/solicitudes/{id}/{aprobar\|rechazar}` | `registros:aprobar` | Aprobar devuelve el código de un solo uso, una única vez |
 
 Si un `POST /upload` apunta a un período y carrera que ya tienen datos, los reemplaza, pero solo si quien sube es el dueño de esa carga, un Directivo o un Admin. En otro caso responde 403.
 
@@ -154,7 +161,20 @@ Todo está en `app/api/permisos.py`: ahí se asignan los permisos a cada rol y e
 
 Ver los datos (períodos, carreras, datos, evolución) no requiere permiso. El usuario **No Docente** solo consulta.
 
-Los permisos `registros:aprobar` y `usuarios:gestionar` están definidos, pero todavía no hay endpoints que los usen (registro de usuarios y recuperación de contraseña quedan pendientes).
+El permiso `registros:aprobar` lo usan los endpoints de solicitudes de registro y de recuperación. El permiso `usuarios:gestionar` está definido, pero todavía no tiene pantallas ni endpoints propios; hoy solo decide quién puede restablecer cuentas Admin y Directivo.
+
+### Registro y recuperación de contraseña
+
+**Reglas.** El correo tiene que ser `nombre@unahur.edu.ar`. La contraseña nueva tiene entre 8 y 72 caracteres, con una mayúscula, una minúscula, un número y un símbolo, y distinta de la anterior. El login no aplica estas reglas: solo exige usuario y contraseña. Las reglas viven en `app/api/validaciones.py` y el frontend las repite solo para avisar mientras se escribe.
+
+**Registro.** La persona pide el alta con su instituto y un rol. Un Directivo o un Admin la ve en la campana de solicitudes y la aprueba (pudiendo cambiar el rol) o la rechaza. Hoy cualquier Directivo ve las solicitudes de todos los institutos.
+
+**Recuperación (sin servidor de mail).**
+1. La persona pide la recuperación con su correo.
+2. Un Directivo o un Admin la aprueba y el sistema le muestra un código de un solo uso (vale 60 minutos). Se muestra una única vez y en la base se guarda hasheado.
+3. Quien aprueba le pasa el código a la persona (en persona, por teléfono o chat), que lo canjea y elige su nueva contraseña.
+
+Reglas de seguridad: nadie puede aprobar su propia solicitud; las cuentas Admin y Directivo solo las restablece un Admin; el código se bloquea tras 5 intentos fallidos; un código nuevo reemplaza al anterior; y si el Admin pierde su contraseña, la restablece otro Admin o se hace a mano en la base. Cambiar el código por un mail es agregar el envío en `aprobar` sin tocar el resto.
 
 ### Usuarios precargados
 
@@ -256,7 +276,7 @@ hurdata-pip-backend/
 │   │   ├── schemas.py           # Modelos Pydantic de entrada/salida
 │   │   └── routers/
 │   │       ├── consultas.py     # GET de períodos, carreras, datos y evolución
-│   │       ├── auth.py          # POST /api/login, GET /api/institutos
+│   │       ├── auth.py          # login, institutos, solicitudes de registro y recuperación de contraseña
 │   │       ├── cargas.py        # GET /api/cargas, /api/carga-activa (historial)
 │   │       └── admin.py         # POST /upload, DELETE /api/... (piden permiso)
 │   ├── db/

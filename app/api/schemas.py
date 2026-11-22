@@ -180,7 +180,9 @@ class EvolucionOut(BaseModel):
     periodos: list[PeriodoEvolucionOut]  # del más viejo al más nuevo
 
 
-# Solucitudes y Registros:
+# ---------------------------------------------------------------------------
+# Solicitudes de registro y recuperación de contraseña
+# ---------------------------------------------------------------------------
 
 class SolicitudRegistroIn(BaseModel):
     email: str
@@ -203,3 +205,35 @@ class SolicitudRegistroOut(BaseModel):
 
 class SolicitudesOut(BaseModel):
     solicitudes: list[SolicitudRegistroOut]
+
+
+class ResolverSolicitudIn(BaseModel):
+    rol: str | None = None
+
+
+class SolicitarRecuperacionIn(BaseModel):
+    usuario: str
+
+
+class CanjearCodigoIn(BaseModel):
+    usuario: str
+    codigo: str
+    nueva_password: str
+
+
+class SolicitudRecuperacionOut(BaseModel):
+    id_solicitud: int
+    usuario: str
+    nombre: str
+    role: str
+    fecha_solicitud: str
+
+
+class SolicitudesRecuperacionOut(BaseModel):
+    solicitudes: list[SolicitudRecuperacionOut]
+
+
+class CodigoRecuperacionOut(BaseModel):
+    message: str
+    codigo: str | None = None      # solo al aprobar; no se vuelve a mostrar
+    expira_en: str | None = None

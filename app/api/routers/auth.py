@@ -1,40 +1,63 @@
 """
 routers/auth.py
 ===============
-Endpoints de autenticación, institutos y solicitudes de registro.
+Autenticación, institutos, solicitudes de registro y recuperación de contraseña.
+
+Recuperación por solicitud (no hay servidor de mail):
+    1. El usuario pide la recuperación con su correo.
+    2. Un Directivo o Admin la aprueba y el sistema le muestra un código de un solo uso.
+    3. Quien aprueba le pasa el código al usuario, que lo canjea y elige su nueva contraseña.
+Las cuentas Admin y Directivo solo las puede resetear un Admin, y nadie puede aprobar la suya.
 """
+import hashlib
+import hmac
+import re
+import secrets
 import sqlite3
-import secrets 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel
 
 from app.api import permisos as P
 from app.api.auth import crear_token, hashear_password, verificar_password
 from app.api.deps import get_db, require_permiso
 from app.api.schemas import (
+    CanjearCodigoIn,
+    CodigoRecuperacionOut,
     InstitutosOut,
     LoginIn,
     MensajeOut,
+    ResolverSolicitudIn,
+    SolicitarRecuperacionIn,
     SolicitudRegistroIn,
     SolicitudesOut,
+    SolicitudesRecuperacionOut,
     TokenOut,
 )
+from app.api.validaciones import email_institucional_valido, mensaje_password, normalizar_email
 from app.db import queries
 
 router = APIRouter(tags=["Autenticación"])
 
-DOMINIOS_PERMITIDOS = ("@unahur.edu.ar",)
+ROLES_SOLICITABLES = ("directivo", "docente", "no_docente")
+ROLES_PRIVILEGIADOS = ("admin", "directivo")   # solo un Admin resetea estas cuentas
+
+CODIGO_VALIDEZ_MIN = 60
+CODIGO_MAX_INTENTOS = 5
+_ALFABETO_CODIGO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # sin 0/O ni 1/I para que se dicte bien
+_ERROR_CODIGO = "El código es incorrecto o venció. Pedí uno nuevo."
 
 
-class ResolverSolicitudIn(BaseModel):
-    rol: str | None = None
-
+# ---------------------------------------------------------------------------
+# Login e institutos
+# ---------------------------------------------------------------------------
 
 @router.post("/api/login", response_model=TokenOut)
 def login(body: LoginIn, conn=Depends(get_db)):
+    """Autentica un usuario y devuelve un JWT Bearer. 401 si usuario o contraseña no coinciden."""
     row = conn.execute(
         "SELECT usuario, nombre, cargo, role, password_hash FROM Usuario WHERE usuario = ?",
-        (body.usuario.strip().lower(),),
+        (normalizar_email(body.usuario),),
     ).fetchone()
 
     if row is None or not verificar_password(body.password, row["password_hash"]):
@@ -45,6 +68,8 @@ def login(body: LoginIn, conn=Depends(get_db)):
         "nombre": row["nombre"],
         "cargo": row["cargo"],
         "role": row["role"],
+        # Solo para que el frontend muestre u oculte botones. El backend NO confía
+        # en esta lista: la recalcula desde el rol en cada request (deps.py).
         "permisos": sorted(P.permisos_de(row["role"])),
     })
     return {"access_token": token, "token_type": "bearer"}
@@ -52,42 +77,45 @@ def login(body: LoginIn, conn=Depends(get_db)):
 
 @router.get("/api/institutos", response_model=InstitutosOut)
 def institutos(conn=Depends(get_db)):
+    """Institutos para el selector del registro. Devuelve solo id y nombre (sin emails)."""
     return {"institutos": queries.listar_institutos(conn)}
 
 
+# ---------------------------------------------------------------------------
+# Solicitudes de registro
+# ---------------------------------------------------------------------------
+
 @router.post("/api/registro/solicitar", response_model=MensajeOut, status_code=201)
 def solicitar_registro(body: SolicitudRegistroIn, conn=Depends(get_db)):
-    email = body.email.strip().lower()
-    if not any(email.endswith(dom) for dom in DOMINIOS_PERMITIDOS):
-        raise HTTPException(
-            status_code=400,
-            detail="Solo se permiten correos institucionales (@unahur.edu.ar).",
-        )
-    if body.rol not in ("directivo", "docente", "no_docente"):
-        raise HTTPException(status_code=400, detail="Rol inválido.")
-    if len(body.password) < 4:
-        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 4 caracteres.")
+    email = normalizar_email(body.email)
+    nombre = body.nombre.strip()
 
-    existe_usuario = conn.execute(
-        "SELECT 1 FROM Usuario WHERE usuario = ?", (email,)
-    ).fetchone()
-    if existe_usuario:
+    if not email_institucional_valido(email):
+        raise HTTPException(status_code=400, detail="Usá un correo institucional válido (nombre@unahur.edu.ar).")
+    if len(nombre) < 3:
+        raise HTTPException(status_code=400, detail="El nombre debe tener al menos 3 caracteres.")
+    if body.rol not in ROLES_SOLICITABLES:
+        raise HTTPException(status_code=400, detail="Rol inválido.")
+    error_password = mensaje_password(body.password)
+    if error_password:
+        raise HTTPException(status_code=400, detail=error_password)
+    if conn.execute("SELECT 1 FROM Directivo WHERE id_directivo = ?", (body.id_instituto,)).fetchone() is None:
+        raise HTTPException(status_code=400, detail="El instituto elegido no existe.")
+
+    if conn.execute("SELECT 1 FROM Usuario WHERE usuario = ?", (email,)).fetchone():
         raise HTTPException(status_code=409, detail="Ese correo ya está registrado.")
 
     try:
         queries.crear_solicitud_registro(
             conn=conn,
             email=email,
-            nombre=body.nombre.strip(),
+            nombre=nombre,
             password_hash=hashear_password(body.password),
             rol=body.rol,
             id_instituto=body.id_instituto,
         )
     except sqlite3.IntegrityError:
-        raise HTTPException(
-            status_code=409,
-            detail="Ya existe una solicitud pendiente para ese correo.",
-        )
+        raise HTTPException(status_code=409, detail="Ya existe una solicitud pendiente para ese correo.")
 
     return {"message": "Solicitud enviada correctamente."}
 
@@ -110,7 +138,7 @@ def resolver_solicitud(
 ):
     if accion not in ("aprobar", "rechazar"):
         raise HTTPException(status_code=400, detail="Acción inválida. Usar 'aprobar' o 'rechazar'.")
-    if body and body.rol and body.rol not in ("directivo", "docente", "no_docente"):
+    if body and body.rol and body.rol not in ROLES_SOLICITABLES:
         raise HTTPException(status_code=400, detail="Rol inválido.")
 
     try:
@@ -129,60 +157,111 @@ def resolver_solicitud(
     return {"message": f"Solicitud {estado} correctamente."}
 
 
-# Todo SOBRE RECUPERAR CONTRASEÑA: 
+# ---------------------------------------------------------------------------
+# Recuperación de contraseña por solicitud
+# ---------------------------------------------------------------------------
+
+def _normalizar_codigo(codigo: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", codigo.upper())
 
 
-class VerificarUsuarioIn(BaseModel):
-    usuario: str
+def _hash_codigo(usuario: str, codigo: str) -> str:
+    return hashlib.sha256(f"{usuario}:{_normalizar_codigo(codigo)}".encode()).hexdigest()
 
 
-class CambiarPasswordIn(BaseModel):
-    usuario: str
-    nueva_password: str
+def _generar_codigo() -> str:
+    letras = "".join(secrets.choice(_ALFABETO_CODIGO) for _ in range(8))
+    return f"{letras[:4]}-{letras[4:]}"
 
 
-@router.post("/api/recuperar-password/verificar", response_model=MensajeOut)
-def verificar_usuario_recuperacion(body: VerificarUsuarioIn, conn=Depends(get_db)):
-    usuario = body.usuario.strip().lower()
-    row = conn.execute(
-        "SELECT 1 FROM Usuario WHERE usuario = ?", (usuario,)
-    ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail="El correo no figura como personal autorizado de UNAHUR.",
-        )
-    return {"message": "Usuario verificado."}
+def _puede_resetear(aprobador: dict, rol_objetivo: str) -> bool:
+    """Admin y Directivo resetean Docente y No Docente. Solo el Admin resetea Admin y Directivo."""
+    if rol_objetivo in ROLES_PRIVILEGIADOS:
+        return P.GESTIONAR_USUARIOS in aprobador["permisos"]
+    return True
 
 
-@router.post("/api/recuperar-password/cambiar", response_model=MensajeOut)
-def cambiar_password_directo(body: CambiarPasswordIn, conn=Depends(get_db)):
-    usuario = body.usuario.strip().lower()
-    if len(body.nueva_password) < 4:
-        raise HTTPException(
-            status_code=400,
-            detail="La nueva contraseña debe tener al menos 4 caracteres.",
-        )
+@router.post("/api/recuperar-password/solicitar", response_model=MensajeOut)
+def solicitar_recuperacion(body: SolicitarRecuperacionIn, conn=Depends(get_db)):
+    """
+    Pide la recuperación. Responde siempre lo mismo, exista o no el correo,
+    para no revelar qué cuentas existen.
+    """
+    usuario = normalizar_email(body.usuario)
+    if queries.buscar_usuario(conn, usuario):
+        queries.crear_solicitud_recuperacion(conn, usuario)
+    return {
+        "message": "Si el correo está registrado, la solicitud quedó enviada. "
+                   "Un directivo o administrador va a revisarla y te va a dar un código."
+    }
 
-    row = conn.execute(
-        "SELECT password_hash FROM Usuario WHERE usuario = ?", (usuario,)
-    ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail="El correo no figura como personal autorizado de UNAHUR.",
-        )
 
-    if verificar_password(body.nueva_password, row["password_hash"]):
-        raise HTTPException(
-            status_code=400,
-            detail="La nueva contraseña no puede ser igual a la anterior.",
-        )
+@router.get("/api/recuperacion/solicitudes", response_model=SolicitudesRecuperacionOut)
+def listar_solicitudes_recuperacion(
+    conn=Depends(get_db),
+    usuario: dict = Depends(require_permiso(P.APROBAR_REGISTROS)),
+):
+    privilegiado = P.GESTIONAR_USUARIOS in usuario["permisos"]
+    return {"solicitudes": queries.listar_solicitudes_recuperacion(conn, privilegiado)}
 
-    with conn:
-        conn.execute(
-            "UPDATE Usuario SET password_hash = ? WHERE usuario = ?",
-            (hashear_password(body.nueva_password), usuario),
-        )
 
+@router.post("/api/recuperacion/solicitudes/{id_solicitud}/{accion}", response_model=CodigoRecuperacionOut)
+def resolver_solicitud_recuperacion(
+    id_solicitud: int,
+    accion: str,
+    conn=Depends(get_db),
+    usuario: dict = Depends(require_permiso(P.APROBAR_REGISTROS)),
+):
+    """Aprobar devuelve el código UNA sola vez. Rechazar cierra la solicitud."""
+    if accion not in ("aprobar", "rechazar"):
+        raise HTTPException(status_code=400, detail="Acción inválida. Usar 'aprobar' o 'rechazar'.")
+
+    sol = queries.obtener_solicitud_recuperacion(conn, id_solicitud)
+    if sol is None or sol["estado"] != "pendiente":
+        raise HTTPException(status_code=404, detail="La solicitud no existe o ya fue resuelta.")
+    if sol["usuario"] == usuario["sub"]:
+        raise HTTPException(status_code=403, detail="No podés aprobar tu propia solicitud. Pedile a otra persona.")
+    if not _puede_resetear(usuario, sol["role"]):
+        raise HTTPException(status_code=403, detail="Esta cuenta solo la puede restablecer un administrador.")
+
+    if accion == "rechazar":
+        queries.rechazar_solicitud_recuperacion(conn, id_solicitud, usuario["sub"])
+        return {"message": "Solicitud rechazada."}
+
+    codigo = _generar_codigo()
+    expira = (datetime.now(timezone.utc) + timedelta(minutes=CODIGO_VALIDEZ_MIN)).isoformat(timespec="seconds")
+    queries.aprobar_solicitud_recuperacion(
+        conn, id_solicitud, usuario["sub"], _hash_codigo(sol["usuario"], codigo), expira
+    )
+    return {
+        "message": f"Solicitud aprobada. Pasale el código a {sol['usuario']}: vale {CODIGO_VALIDEZ_MIN} minutos y se usa una sola vez.",
+        "codigo": codigo,
+        "expira_en": expira,
+    }
+
+
+@router.post("/api/recuperar-password/canjear", response_model=MensajeOut)
+def canjear_codigo(body: CanjearCodigoIn, conn=Depends(get_db)):
+    """Cambia la contraseña con un código aprobado. Mismo error para cualquier fallo del código."""
+    usuario = normalizar_email(body.usuario)
+    cuenta = queries.buscar_usuario(conn, usuario)
+    sol = queries.solicitud_recuperacion_aprobada(conn, usuario) if cuenta else None
+    if sol is None:
+        raise HTTPException(status_code=400, detail=_ERROR_CODIGO)
+
+    if datetime.fromisoformat(sol["expira_en"]) < datetime.now(timezone.utc):
+        queries.rechazar_solicitud_recuperacion(conn, sol["id_solicitud"], "sistema")
+        raise HTTPException(status_code=400, detail=_ERROR_CODIGO)
+
+    if not hmac.compare_digest(sol["codigo_hash"], _hash_codigo(usuario, body.codigo)):
+        queries.sumar_intento_recuperacion(conn, sol["id_solicitud"], CODIGO_MAX_INTENTOS)
+        raise HTTPException(status_code=400, detail=_ERROR_CODIGO)
+
+    error_password = mensaje_password(body.nueva_password)
+    if error_password:
+        raise HTTPException(status_code=400, detail=error_password)
+    if verificar_password(body.nueva_password, cuenta["password_hash"]):
+        raise HTTPException(status_code=400, detail="La nueva contraseña no puede ser igual a la anterior.")
+
+    queries.canjear_recuperacion(conn, sol["id_solicitud"], usuario, hashear_password(body.nueva_password))
     return {"message": "Contraseña actualizada correctamente."}

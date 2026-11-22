@@ -476,3 +476,128 @@ def test_21_evolucion_entre_periodos(c):
 
     # Carrera sin datos
     assert c.get("/api/evolucion", params={"carrera": "No existe"}).json() == {"materias": [], "periodos": []}
+
+
+# ---------------------------------------------------------------------------
+# Solicitudes de registro y recuperación de contraseña
+# ---------------------------------------------------------------------------
+
+CLAVE_OK = "Nueva#Clave1"
+
+
+def _pedido_registro(email, **cambios):
+    datos = {"email": email, "nombre": "Ana Pérez", "password": CLAVE_OK, "rol": "docente", "id_instituto": 1}
+    datos.update(cambios)
+    return datos
+
+
+def test_22_solicitud_de_registro_valida_y_se_aprueba(c):
+    pedir = lambda **kw: c.post("/api/registro/solicitar", json=_pedido_registro(**kw))
+
+    # Correo: solo @unahur.edu.ar con parte local
+    for malo in ("ana@gmail.com", "@unahur.edu.ar", "a@b.com@unahur.edu.ar", "sin-arroba", "a b@unahur.edu.ar"):
+        assert pedir(email=malo).status_code == 400, malo
+    # Contraseña: 8+ caracteres con mayúscula, minúscula, número y símbolo
+    for mala in ("Ab#1", "sinmayuscula#1", "SINMINUSCULA#1", "SinNumero#abc", "SinSimbolo123"):
+        assert pedir(email="ana@unahur.edu.ar", password=mala).status_code == 400, mala
+    assert pedir(email="ana@unahur.edu.ar", nombre="  ").status_code == 400
+    assert pedir(email="ana@unahur.edu.ar", rol="admin").status_code == 400
+    assert pedir(email="ana@unahur.edu.ar", id_instituto=999).status_code == 400
+
+    assert pedir(email="Ana@UNAHUR.edu.ar").status_code == 201      # se normaliza a minúsculas
+    assert pedir(email="ana@unahur.edu.ar").status_code == 409      # ya hay una pendiente
+    assert pedir(email="admin@unahur.edu.ar").status_code == 409    # ya es usuario
+
+    # Solo quien tiene registros:aprobar ve y resuelve las solicitudes
+    assert c.get("/api/registro/solicitudes").status_code == 401
+    assert c.get("/api/registro/solicitudes", headers=token_de(c, "docente@unahur.edu.ar")).status_code == 403
+    pendientes = c.get("/api/registro/solicitudes", headers=H).json()["solicitudes"]
+    sol = next(s for s in pendientes if s["email"] == "ana@unahur.edu.ar")
+    r = c.post(f"/api/registro/solicitudes/{sol['id_solicitud']}/aprobar", headers=H)
+    assert r.status_code == 200, r.text
+    assert c.post("/api/login", json={"usuario": "ana@unahur.edu.ar", "password": CLAVE_OK}).status_code == 200
+
+
+def _pedir_recuperacion(c, usuario):
+    return c.post("/api/recuperar-password/solicitar", json={"usuario": usuario})
+
+
+def _aprobar_recuperacion(c, headers, usuario):
+    """Aprueba la solicitud pendiente del usuario y devuelve la respuesta."""
+    lista = c.get("/api/recuperacion/solicitudes", headers=headers).json()["solicitudes"]
+    sol = next(s for s in lista if s["usuario"] == usuario)
+    return c.post(f"/api/recuperacion/solicitudes/{sol['id_solicitud']}/aprobar", headers=headers)
+
+
+def test_23_recuperacion_de_contrasena_por_solicitud(c):
+    canjear = lambda usuario, codigo, clave: c.post(
+        "/api/recuperar-password/canjear", json={"usuario": usuario, "codigo": codigo, "nueva_password": clave}
+    )
+    # Responde igual exista o no el correo (no revela qué cuentas existen)
+    existe = _pedir_recuperacion(c, "docente@unahur.edu.ar")
+    no_existe = _pedir_recuperacion(c, "nadie@unahur.edu.ar")
+    assert existe.status_code == no_existe.status_code == 200
+    assert existe.json() == no_existe.json()
+    # Los endpoints viejos, sin ninguna verificación, ya no existen
+    assert c.post("/api/recuperar-password/cambiar", json={}).status_code == 404
+    assert c.post("/api/recuperar-password/verificar", json={}).status_code == 404
+
+    # Solo ve y resuelve quien tiene registros:aprobar
+    assert c.get("/api/recuperacion/solicitudes").status_code == 401
+    assert c.get("/api/recuperacion/solicitudes", headers=token_de(c, "docente@unahur.edu.ar")).status_code == 403
+
+    # Sin aprobar no hay código: no se puede cambiar la contraseña
+    assert canjear("docente@unahur.edu.ar", "ABCD-EFGH", CLAVE_OK).status_code == 400
+
+    r = _aprobar_recuperacion(c, H, "docente@unahur.edu.ar")
+    assert r.status_code == 200, r.text
+    codigo = r.json()["codigo"]
+    assert len(codigo) == 9 and r.json()["expira_en"]
+
+    # Código incorrecto, contraseña débil y contraseña igual a la anterior se rechazan
+    assert canjear("docente@unahur.edu.ar", "XXXX-XXXX", CLAVE_OK).status_code == 400
+    assert canjear("docente@unahur.edu.ar", codigo, "debil").status_code == 400
+    assert canjear("docente@unahur.edu.ar", codigo, "Origone151").status_code == 400   # la actual
+    # El código de otra cuenta no sirve
+    assert canjear("nodocente@unahur.edu.ar", codigo, CLAVE_OK).status_code == 400
+
+    # Con el código correcto (en minúsculas y sin guion también vale) se cambia, una sola vez
+    ok = canjear("DOCENTE@unahur.edu.ar", codigo.replace("-", "").lower(), CLAVE_OK)
+    assert ok.status_code == 200, ok.text
+    assert c.post("/api/login", json={"usuario": "docente@unahur.edu.ar", "password": CLAVE_OK}).status_code == 200
+    assert c.post("/api/login", json={"usuario": "docente@unahur.edu.ar", "password": "Origone151"}).status_code == 401
+    assert canjear("docente@unahur.edu.ar", codigo, "Otra#Clave22").status_code == 400
+
+
+def test_24_recuperacion_reglas_de_quien_aprueba(c):
+    directivo = token_de(c, "directivo@unahur.edu.ar")
+    # Una solicitud de un Directivo no la ve ni la aprueba otro Directivo: solo un Admin
+    _pedir_recuperacion(c, "directivo@unahur.edu.ar")
+    visibles = c.get("/api/recuperacion/solicitudes", headers=directivo).json()["solicitudes"]
+    assert all(s["usuario"] != "directivo@unahur.edu.ar" for s in visibles)
+    en_admin = c.get("/api/recuperacion/solicitudes", headers=H).json()["solicitudes"]
+    sol = next(s for s in en_admin if s["usuario"] == "directivo@unahur.edu.ar")
+    # Nadie aprueba la propia
+    assert c.post(f"/api/recuperacion/solicitudes/{sol['id_solicitud']}/aprobar", headers=directivo).status_code == 403
+    # Un Directivo no aprueba la de un Admin
+    _pedir_recuperacion(c, "admin@unahur.edu.ar")
+    sol_admin = next(s for s in c.get("/api/recuperacion/solicitudes", headers=H).json()["solicitudes"]
+                     if s["usuario"] == "admin@unahur.edu.ar")
+    assert c.post(f"/api/recuperacion/solicitudes/{sol_admin['id_solicitud']}/aprobar", headers=directivo).status_code == 403
+    assert c.post(f"/api/recuperacion/solicitudes/{sol_admin['id_solicitud']}/aprobar", headers=H).status_code == 403  # la propia
+    # Pero un Admin sí aprueba la de un Directivo, y rechazar cierra la solicitud
+    assert c.post(f"/api/recuperacion/solicitudes/{sol['id_solicitud']}/rechazar", headers=H).status_code == 200
+    assert c.post(f"/api/recuperacion/solicitudes/{sol['id_solicitud']}/aprobar", headers=H).status_code == 404
+
+
+def test_25_codigo_se_bloquea_tras_cinco_intentos(c):
+    canjear = lambda codigo: c.post(
+        "/api/recuperar-password/canjear",
+        json={"usuario": "nodocente@unahur.edu.ar", "codigo": codigo, "nueva_password": CLAVE_OK},
+    )
+    _pedir_recuperacion(c, "nodocente@unahur.edu.ar")
+    codigo = _aprobar_recuperacion(c, H, "nodocente@unahur.edu.ar").json()["codigo"]
+    for _ in range(5):
+        assert canjear("ZZZZ-ZZZZ").status_code == 400
+    # Agotados los intentos, ni el código correcto sirve: hay que pedir otro
+    assert canjear(codigo).status_code == 400

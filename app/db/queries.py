@@ -580,57 +580,120 @@ def resolver_solicitud_registro(
 
 
 # ---------------------------------------------------------------------------
-# Recuperación de contraseña
+# Recuperación de contraseña por solicitud
 # ---------------------------------------------------------------------------
 
-def crear_codigo_recuperacion(
-    conn: sqlite3.Connection, usuario: str, codigo: str, minutos_validez: int = 15
+def buscar_usuario(conn: sqlite3.Connection, usuario: str) -> dict | None:
+    row = conn.execute(
+        "SELECT usuario, nombre, role, password_hash FROM Usuario WHERE usuario = ?",
+        (usuario,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def crear_solicitud_recuperacion(conn: sqlite3.Connection, usuario: str) -> bool:
+    """Crea la solicitud. Devuelve False si el usuario ya tiene una abierta."""
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO Solicitud_Recuperacion (usuario, fecha_solicitud) VALUES (?, ?)",
+                (usuario, ahora_utc()),
+            )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def listar_solicitudes_recuperacion(conn: sqlite3.Connection, incluye_privilegiados: bool) -> list[dict]:
+    """Pendientes. Quien no es Admin no ve las de cuentas Admin o Directivo."""
+    filtro = "" if incluye_privilegiados else "AND u.role IN ('docente', 'no_docente')"
+    rows = conn.execute(
+        f"""
+        SELECT s.id_solicitud, s.usuario, u.nombre, u.role, s.fecha_solicitud
+        FROM Solicitud_Recuperacion s
+        JOIN Usuario u ON u.usuario = s.usuario
+        WHERE s.estado = 'pendiente' {filtro}
+        ORDER BY s.id_solicitud DESC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def obtener_solicitud_recuperacion(conn: sqlite3.Connection, id_solicitud: int) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT s.*, u.role
+        FROM Solicitud_Recuperacion s
+        JOIN Usuario u ON u.usuario = s.usuario
+        WHERE s.id_solicitud = ?
+        """,
+        (id_solicitud,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def aprobar_solicitud_recuperacion(
+    conn: sqlite3.Connection, id_solicitud: int, resuelto_por: str, codigo_hash: str, expira_en: str
 ) -> None:
-    """Invalida códigos anteriores sin usar del usuario y guarda el nuevo."""
-    expira_en = (datetime.now(timezone.utc) + timedelta(minutes=minutos_validez)).isoformat(
-        timespec="seconds"
-    )
     with conn:
         conn.execute(
-            "UPDATE Recuperacion_Password SET usado = 1 WHERE usuario = ? AND usado = 0",
-            (usuario,),
+            """
+            UPDATE Solicitud_Recuperacion
+            SET estado = 'aprobada', codigo_hash = ?, expira_en = ?, intentos = 0,
+                resuelto_por = ?, fecha_resolucion = ?
+            WHERE id_solicitud = ? AND estado = 'pendiente'
+            """,
+            (codigo_hash, expira_en, resuelto_por, ahora_utc(), id_solicitud),
+        )
+
+
+def rechazar_solicitud_recuperacion(conn: sqlite3.Connection, id_solicitud: int, resuelto_por: str) -> None:
+    with conn:
+        conn.execute(
+            """
+            UPDATE Solicitud_Recuperacion
+            SET estado = 'rechazada', resuelto_por = ?, fecha_resolucion = ?
+            WHERE id_solicitud = ? AND estado IN ('pendiente', 'aprobada')
+            """,
+            (resuelto_por, ahora_utc(), id_solicitud),
+        )
+
+
+def solicitud_recuperacion_aprobada(conn: sqlite3.Connection, usuario: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM Solicitud_Recuperacion WHERE usuario = ? AND estado = 'aprobada'",
+        (usuario,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def sumar_intento_recuperacion(conn: sqlite3.Connection, id_solicitud: int, maximo: int) -> None:
+    """Cuenta un intento fallido. Al llegar al máximo la solicitud queda rechazada."""
+    with conn:
+        conn.execute(
+            "UPDATE Solicitud_Recuperacion SET intentos = intentos + 1 WHERE id_solicitud = ?",
+            (id_solicitud,),
         )
         conn.execute(
             """
-            INSERT INTO Recuperacion_Password (usuario, codigo, expira_en)
-            VALUES (?, ?, ?)
+            UPDATE Solicitud_Recuperacion
+            SET estado = 'rechazada', fecha_resolucion = ?
+            WHERE id_solicitud = ? AND intentos >= ?
             """,
-            (usuario, codigo, expira_en),
+            (ahora_utc(), id_solicitud, maximo),
         )
 
 
-def confirmar_codigo_recuperacion(
-    conn: sqlite3.Connection, usuario: str, codigo: str, nuevo_password_hash: str
+def canjear_recuperacion(
+    conn: sqlite3.Connection, id_solicitud: int, usuario: str, nuevo_password_hash: str
 ) -> None:
-    """Verifica el código vigente, actualiza la clave en Usuario y marca el código como usado."""
-    row = conn.execute(
-        """
-        SELECT id_recuperacion, expira_en
-        FROM Recuperacion_Password
-        WHERE usuario = ? AND codigo = ? AND usado = 0
-        ORDER BY id_recuperacion DESC
-        LIMIT 1
-        """,
-        (usuario, codigo),
-    ).fetchone()
-
-    if row is None:
-        raise ValueError("El código ingresado es incorrecto o ya fue utilizado.")
-
-    if datetime.fromisoformat(row["expira_en"]) < datetime.now(timezone.utc):
-        raise ValueError("El código expiró. Solicitá uno nuevo.")
-
+    """Cambia la contraseña y marca el código como usado, en una sola transacción."""
     with conn:
         conn.execute(
             "UPDATE Usuario SET password_hash = ? WHERE usuario = ?",
             (nuevo_password_hash, usuario),
         )
         conn.execute(
-            "UPDATE Recuperacion_Password SET usado = 1 WHERE id_recuperacion = ?",
-            (row["id_recuperacion"],),
+            "UPDATE Solicitud_Recuperacion SET estado = 'usada', fecha_resolucion = ? WHERE id_solicitud = ?",
+            (ahora_utc(), id_solicitud),
         )
