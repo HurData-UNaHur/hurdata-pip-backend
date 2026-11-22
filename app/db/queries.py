@@ -486,3 +486,151 @@ def listar_institutos(conn: sqlite3.Connection) -> list[dict]:
         "SELECT id_directivo AS id, nombre FROM Directivo ORDER BY id_directivo"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+
+# Solicitudes y Registros:
+
+def crear_solicitud_registro(
+    conn: sqlite3.Connection,
+    email: str,
+    nombre: str,
+    password_hash: str,
+    rol: str,
+    id_instituto: int,
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO Solicitud_Registro (email, nombre, password_hash, role, id_directivo, fecha_solicitud)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (email, nombre, password_hash, rol, id_instituto, ahora_utc()),
+        )
+
+
+def listar_solicitudes_pendientes(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT s.id_solicitud, s.email, s.nombre, s.role AS rol,
+               s.id_directivo AS id_instituto, d.nombre AS nombre_instituto,
+               s.estado, s.fecha_solicitud
+        FROM Solicitud_Registro s
+        JOIN Directivo d ON d.id_directivo = s.id_directivo
+        WHERE s.estado = 'pendiente'
+        ORDER BY s.id_solicitud DESC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolver_solicitud_registro(
+    conn: sqlite3.Connection,
+    id_solicitud: int,
+    accion: str,  # 'aprobar' | 'rechazar'
+    resuelto_por: str,
+    rol_asignado: str | None = None,
+) -> str:
+    sol = conn.execute(
+        "SELECT * FROM Solicitud_Registro WHERE id_solicitud = ? AND estado = 'pendiente'",
+        (id_solicitud,),
+    ).fetchone()
+    if sol is None:
+        raise ValueError("La solicitud no existe o ya fue resuelta.")
+
+    if accion == "rechazar":
+        # Se elimina la fila para liberar el correo por si quiere volver a enviar la solicitud
+        with conn:
+            conn.execute(
+                "DELETE FROM Solicitud_Registro WHERE id_solicitud = ?",
+                (id_solicitud,),
+            )
+        return "rechazada y eliminada"
+
+    rol_final = rol_asignado or sol["role"]
+    cargo_map = {
+        "directivo": "Directivo",
+        "docente": "Docente",
+        "no_docente": "No Docente",
+    }
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE Solicitud_Registro
+            SET estado = 'aprobada', role = ?, resuelto_por = ?, fecha_resolucion = ?
+            WHERE id_solicitud = ?
+            """,
+            (rol_final, resuelto_por, ahora_utc(), id_solicitud),
+        )
+        conn.execute(
+            """
+            INSERT INTO Usuario (usuario, nombre, cargo, role, password_hash)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                sol["email"],
+                sol["nombre"],
+                cargo_map.get(rol_final, "Docente"),
+                rol_final,
+                sol["password_hash"],
+            ),
+        )
+    return "aprobada"
+
+
+# ---------------------------------------------------------------------------
+# Recuperación de contraseña
+# ---------------------------------------------------------------------------
+
+def crear_codigo_recuperacion(
+    conn: sqlite3.Connection, usuario: str, codigo: str, minutos_validez: int = 15
+) -> None:
+    """Invalida códigos anteriores sin usar del usuario y guarda el nuevo."""
+    expira_en = (datetime.now(timezone.utc) + timedelta(minutes=minutos_validez)).isoformat(
+        timespec="seconds"
+    )
+    with conn:
+        conn.execute(
+            "UPDATE Recuperacion_Password SET usado = 1 WHERE usuario = ? AND usado = 0",
+            (usuario,),
+        )
+        conn.execute(
+            """
+            INSERT INTO Recuperacion_Password (usuario, codigo, expira_en)
+            VALUES (?, ?, ?)
+            """,
+            (usuario, codigo, expira_en),
+        )
+
+
+def confirmar_codigo_recuperacion(
+    conn: sqlite3.Connection, usuario: str, codigo: str, nuevo_password_hash: str
+) -> None:
+    """Verifica el código vigente, actualiza la clave en Usuario y marca el código como usado."""
+    row = conn.execute(
+        """
+        SELECT id_recuperacion, expira_en
+        FROM Recuperacion_Password
+        WHERE usuario = ? AND codigo = ? AND usado = 0
+        ORDER BY id_recuperacion DESC
+        LIMIT 1
+        """,
+        (usuario, codigo),
+    ).fetchone()
+
+    if row is None:
+        raise ValueError("El código ingresado es incorrecto o ya fue utilizado.")
+
+    if datetime.fromisoformat(row["expira_en"]) < datetime.now(timezone.utc):
+        raise ValueError("El código expiró. Solicitá uno nuevo.")
+
+    with conn:
+        conn.execute(
+            "UPDATE Usuario SET password_hash = ? WHERE usuario = ?",
+            (nuevo_password_hash, usuario),
+        )
+        conn.execute(
+            "UPDATE Recuperacion_Password SET usado = 1 WHERE id_recuperacion = ?",
+            (row["id_recuperacion"],),
+        )

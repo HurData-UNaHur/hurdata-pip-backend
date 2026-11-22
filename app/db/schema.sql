@@ -158,3 +158,37 @@ CREATE TABLE IF NOT EXISTS Carga (
 -- Como mucho UNA carga activa por período + carrera
 CREATE UNIQUE INDEX IF NOT EXISTS idx_carga_activa
     ON Carga(id_periodo, id_carrera) WHERE estado = 'activa';
+
+
+
+/*
+Solucitudes y Registros
+*/
+
+CREATE TABLE IF NOT EXISTS Solicitud_Registro (
+    id_solicitud    INTEGER PRIMARY KEY AUTOINCREMENT,
+    email           TEXT    NOT NULL UNIQUE,
+    nombre          TEXT    NOT NULL,
+    password_hash   TEXT    NOT NULL,
+    role            TEXT    NOT NULL
+                    CHECK (role IN ('directivo', 'docente', 'no_docente')),
+    id_directivo    INTEGER NOT NULL REFERENCES Directivo(id_directivo),
+    estado          TEXT    NOT NULL DEFAULT 'pendiente'
+                    CHECK (estado IN ('pendiente', 'aprobada', 'rechazada')),
+    fecha_solicitud TEXT    NOT NULL,
+    resuelto_por    TEXT,
+    fecha_resolucion TEXT
+);
+
+
+-- -----------------------------------------------------------------------------
+-- Recuperación de contraseña (códigos temporales de 6 dígitos)
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS Recuperacion_Password (
+    id_recuperacion INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario         TEXT    NOT NULL REFERENCES Usuario(usuario) ON DELETE CASCADE,
+    codigo          TEXT    NOT NULL,
+    expira_en       TEXT    NOT NULL,         
+    usado           INTEGER NOT NULL DEFAULT 0
+);

@@ -178,3 +178,28 @@ class PeriodoEvolucionOut(BaseModel):
 class EvolucionOut(BaseModel):
     materias: list[MateriaRefOut]       # materias de la carrera (para el selector)
     periodos: list[PeriodoEvolucionOut]  # del más viejo al más nuevo
+
+
+# Solucitudes y Registros:
+
+class SolicitudRegistroIn(BaseModel):
+    email: str
+    nombre: str
+    password: str
+    rol: str
+    id_instituto: int
+
+
+class SolicitudRegistroOut(BaseModel):
+    id_solicitud: int
+    email: str
+    nombre: str
+    rol: str
+    id_instituto: int
+    nombre_instituto: str
+    estado: str
+    fecha_solicitud: str
+
+
+class SolicitudesOut(BaseModel):
+    solicitudes: list[SolicitudRegistroOut]
