@@ -113,7 +113,12 @@ CREATE TABLE IF NOT EXISTS Usuario (
     -- Los permisos de cada rol están en app/api/permisos.py
     role            TEXT    NOT NULL
                     CHECK (role IN ('admin', 'directivo', 'docente', 'no_docente')),
-    password_hash   TEXT    NOT NULL
+    password_hash   TEXT    NOT NULL,
+    -- Instituto al que pertenece (NULL en las cuentas precargadas)
+    id_directivo    INTEGER REFERENCES Directivo(id_directivo),
+    -- Límite de intentos al cambiar la contraseña con la sesión iniciada
+    intentos_password       INTEGER NOT NULL DEFAULT 0,
+    bloqueo_password_hasta  TEXT
 );
 
 -- Un instituto por fila, con el email de su dirección (quien aprueba los registros).

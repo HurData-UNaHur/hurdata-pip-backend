@@ -211,6 +211,18 @@ class ResolverSolicitudIn(BaseModel):
     rol: str | None = None
 
 
+class PerfilOut(BaseModel):
+    usuario: str
+    nombre: str
+    cargo: str
+    role: str
+    instituto: str | None = None
+
+
+class CambiarPasswordIn(BaseModel):
+    password_actual: str
+    password_nueva: str
+
 class SolicitarRecuperacionIn(BaseModel):
     usuario: str
 

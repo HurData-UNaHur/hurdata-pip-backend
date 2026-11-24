@@ -565,8 +565,8 @@ def resolver_solicitud_registro(
         )
         conn.execute(
             """
-            INSERT INTO Usuario (usuario, nombre, cargo, role, password_hash)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO Usuario (usuario, nombre, cargo, role, password_hash, id_directivo)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 sol["email"],
@@ -574,6 +574,7 @@ def resolver_solicitud_registro(
                 cargo_map.get(rol_final, "Docente"),
                 rol_final,
                 sol["password_hash"],
+                sol["id_directivo"],
             ),
         )
     return "aprobada"
@@ -590,6 +591,52 @@ def buscar_usuario(conn: sqlite3.Connection, usuario: str) -> dict | None:
     ).fetchone()
     return dict(row) if row else None
 
+
+def obtener_perfil(conn: sqlite3.Connection, usuario: str) -> dict | None:
+    """
+    Datos de la cuenta para la pantalla "Mi cuenta". El instituto es el que
+    eligió al registrarse; las cuentas precargadas no tienen (instituto = None).
+    """
+    row = conn.execute(
+        """
+        SELECT u.usuario, u.nombre, u.cargo, u.role, d.nombre AS instituto
+        FROM Usuario u
+        LEFT JOIN Directivo d ON d.id_directivo = u.id_directivo
+        WHERE u.usuario = ?
+        """,
+        (usuario,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def hash_password_de(conn: sqlite3.Connection, usuario: str) -> str | None:
+    row = conn.execute("SELECT password_hash FROM Usuario WHERE usuario = ?", (usuario,)).fetchone()
+    return row["password_hash"] if row else None
+
+
+def estado_intentos_password(conn: sqlite3.Connection, usuario: str) -> tuple[int, str | None]:
+    """(intentos fallidos acumulados, bloqueo_hasta ISO o None) al cambiar la contraseña."""
+    row = conn.execute(
+        "SELECT intentos_password, bloqueo_password_hasta FROM Usuario WHERE usuario = ?", (usuario,)
+    ).fetchone()
+    return (row["intentos_password"], row["bloqueo_password_hasta"]) if row else (0, None)
+
+
+def guardar_intentos_password(
+    conn: sqlite3.Connection, usuario: str, intentos: int, bloqueo_hasta: str | None
+) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE Usuario SET intentos_password = ?, bloqueo_password_hasta = ? WHERE usuario = ?",
+            (intentos, bloqueo_hasta, usuario),
+        )
+
+def actualizar_password(conn: sqlite3.Connection, usuario: str, nuevo_password_hash: str) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE Usuario SET password_hash = ?, intentos_password = 0, bloqueo_password_hasta = NULL WHERE usuario = ?",
+            (nuevo_password_hash, usuario),
+        )
 
 def crear_solicitud_recuperacion(conn: sqlite3.Connection, usuario: str) -> bool:
     """Crea la solicitud. Devuelve False si el usuario ya tiene una abierta."""

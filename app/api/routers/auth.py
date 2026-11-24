@@ -20,13 +20,15 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.api import permisos as P
 from app.api.auth import crear_token, hashear_password, verificar_password
-from app.api.deps import get_db, require_permiso
+from app.api.deps import get_db, get_usuario_actual, require_permiso
 from app.api.schemas import (
+    CambiarPasswordIn,
     CanjearCodigoIn,
     CodigoRecuperacionOut,
     InstitutosOut,
     LoginIn,
     MensajeOut,
+    PerfilOut,
     ResolverSolicitudIn,
     SolicitarRecuperacionIn,
     SolicitudRegistroIn,
@@ -44,6 +46,8 @@ ROLES_PRIVILEGIADOS = ("admin", "directivo")   # solo un Admin resetea estas cue
 
 CODIGO_VALIDEZ_MIN = 60
 CODIGO_MAX_INTENTOS = 5
+PASSWORD_MAX_INTENTOS = 5     # errores seguidos de contraseña actual en "Mi cuenta"
+PASSWORD_BLOQUEO_MIN = 15
 _ALFABETO_CODIGO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # sin 0/O ni 1/I para que se dicte bien
 _ERROR_CODIGO = "El código es incorrecto o venció. Pedí uno nuevo."
 
@@ -80,6 +84,68 @@ def institutos(conn=Depends(get_db)):
     """Institutos para el selector del registro. Devuelve solo id y nombre (sin emails)."""
     return {"institutos": queries.listar_institutos(conn)}
 
+
+# ---------------------------------------------------------------------------
+# Mi cuenta (usuario con sesión iniciada)
+# ---------------------------------------------------------------------------
+
+@router.get("/api/perfil", response_model=PerfilOut)
+def perfil(conn=Depends(get_db), actual: dict = Depends(get_usuario_actual)):
+    """Datos de la cuenta con sesión iniciada. Se leen de la base, no del token."""
+    datos = queries.obtener_perfil(conn, actual["sub"])
+    if datos is None:
+        raise HTTPException(status_code=404, detail="La cuenta ya no existe.")
+    return datos
+
+
+@router.post("/api/perfil/cambiar-password", response_model=MensajeOut)
+def cambiar_password(body: CambiarPasswordIn, conn=Depends(get_db), actual: dict = Depends(get_usuario_actual)):
+    """
+    Cambia la contraseña de quien tiene la sesión iniciada, pidiendo la actual.
+    Devuelve 400 (no 401) si la actual está mal, para no confundirlo con una sesión vencida.
+    """
+    usuario = actual["sub"]
+    hash_actual = queries.hash_password_de(conn, usuario)
+    if hash_actual is None:
+        raise HTTPException(status_code=404, detail="La cuenta ya no existe.")
+
+    # Límite de intentos: tras PASSWORD_MAX_INTENTOS errores seguidos se bloquea el cambio un rato
+    intentos, bloqueo_hasta = queries.estado_intentos_password(conn, usuario)
+    ahora = datetime.now(timezone.utc)
+    if bloqueo_hasta:
+        segundos = (datetime.fromisoformat(bloqueo_hasta) - ahora).total_seconds()
+        if segundos > 0:
+            minutos = max(1, -(-int(segundos) // 60))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Superaste los intentos permitidos. Probá de nuevo en {minutos} minutos.",
+            )
+        intentos = 0   # el bloqueo ya venció
+
+    if not verificar_password(body.password_actual, hash_actual):
+        intentos += 1
+        if intentos >= PASSWORD_MAX_INTENTOS:
+            hasta = (ahora + timedelta(minutes=PASSWORD_BLOQUEO_MIN)).isoformat(timespec="seconds")
+            queries.guardar_intentos_password(conn, usuario, 0, hasta)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Superaste los intentos permitidos. Probá de nuevo en {PASSWORD_BLOQUEO_MIN} minutos.",
+            )
+        queries.guardar_intentos_password(conn, usuario, intentos, None)
+        restantes = PASSWORD_MAX_INTENTOS - intentos
+        raise HTTPException(
+            status_code=400,
+            detail=f"La contraseña actual no es correcta. Te quedan {restantes} {'intento' if restantes == 1 else 'intentos'}.",
+        )
+
+    error_password = mensaje_password(body.password_nueva)
+    if error_password:
+        raise HTTPException(status_code=400, detail=error_password)
+    if verificar_password(body.password_nueva, hash_actual):
+        raise HTTPException(status_code=400, detail="La nueva contraseña no puede ser igual a la anterior.")
+
+    queries.actualizar_password(conn, usuario, hashear_password(body.password_nueva))
+    return {"message": "Contraseña actualizada correctamente."}
 
 # ---------------------------------------------------------------------------
 # Solicitudes de registro

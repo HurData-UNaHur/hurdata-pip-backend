@@ -601,3 +601,116 @@ def test_25_codigo_se_bloquea_tras_cinco_intentos(c):
         assert canjear("ZZZZ-ZZZZ").status_code == 400
     # Agotados los intentos, ni el código correcto sirve: hay que pedir otro
     assert canjear(codigo).status_code == 400
+
+def token_de_con(c, usuario: str, clave: str) -> dict:
+    """Header Authorization con un JWT real del usuario y la contraseña indicados."""
+    r = c.post("/api/login", json={"usuario": usuario, "password": clave})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def test_26_mi_cuenta_perfil_y_cambio_de_contrasena(c):
+    login = lambda usuario, clave: c.post("/api/login", json={"usuario": usuario, "password": clave})
+    cambiar = lambda headers, actual, nueva: c.post(
+        "/api/perfil/cambiar-password", headers=headers, json={"password_actual": actual, "password_nueva": nueva}
+    )
+    # Sin sesión no hay perfil ni cambio
+    assert c.get("/api/perfil").status_code == 401
+    assert c.post("/api/perfil/cambiar-password", json={"password_actual": "x", "password_nueva": "y"}).status_code == 401
+
+    # Cuenta precargada: datos del usuario y sin instituto
+    perfil = c.get("/api/perfil", headers=H).json()
+    assert perfil == {
+        "usuario": "admin@unahur.edu.ar", "nombre": "Admin", "cargo": "Desarrollador",
+        "role": "admin", "instituto": None,
+    }
+
+    # Cuenta registrada por solicitud (test 22): trae el instituto que eligió
+    ana = token_de_con(c, "ana@unahur.edu.ar", CLAVE_OK)
+    perfil_ana = c.get("/api/perfil", headers=ana).json()
+    assert perfil_ana["usuario"] == "ana@unahur.edu.ar"
+    assert perfil_ana["role"] == "docente"
+    nombre_instituto = next(i["nombre"] for i in c.get("/api/institutos").json()["institutos"] if i["id"] == 1)
+    assert perfil_ana["instituto"] == nombre_instituto
+    assert "password_hash" not in perfil_ana
+
+    # Contraseña actual incorrecta: 400 (no 401, que cerraría la sesión en el frontend)
+    assert cambiar(ana, "Incorrecta#1", "Otra#Clave22").status_code == 400
+    # La nueva tiene que cumplir la política y ser distinta de la actual
+    for mala in ("debil", "sinmayuscula#1", "SINMINUSCULA#1", "SinNumero#abc", "SinSimbolo123"):
+        assert cambiar(ana, CLAVE_OK, mala).status_code == 400, mala
+    assert cambiar(ana, CLAVE_OK, CLAVE_OK).status_code == 400
+
+    # Cambio válido: la vieja deja de servir y la nueva sí
+    ok = cambiar(ana, CLAVE_OK, "Otra#Clave22")
+    assert ok.status_code == 200, ok.text
+    assert login("ana@unahur.edu.ar", CLAVE_OK).status_code == 401
+    assert login("ana@unahur.edu.ar", "Otra#Clave22").status_code == 200
+
+def test_27_cambio_de_contrasena_se_bloquea_tras_cinco_intentos(c):
+    from app.db.connection import get_connection
+
+    # Cuenta nueva por solicitud, para no tocar las precargadas
+    assert c.post("/api/registro/solicitar", json=_pedido_registro("luis@unahur.edu.ar")).status_code == 201
+    sol = next(s for s in c.get("/api/registro/solicitudes", headers=H).json()["solicitudes"]
+               if s["email"] == "luis@unahur.edu.ar")
+    assert c.post(f"/api/registro/solicitudes/{sol['id_solicitud']}/aprobar", headers=H).status_code == 200
+    luis = token_de_con(c, "luis@unahur.edu.ar", CLAVE_OK)
+    cambiar = lambda actual: c.post(
+        "/api/perfil/cambiar-password", headers=luis,
+        json={"password_actual": actual, "password_nueva": "Otra#Clave22"},
+    )
+
+    # Cuatro errores avisan cuántos intentos quedan; el quinto bloquea
+    for restantes in (4, 3, 2, 1):
+        r = cambiar("Incorrecta#1")
+        assert r.status_code == 400
+        assert f"Te quedan {restantes}" in r.json()["detail"]
+    assert cambiar("Incorrecta#1").status_code == 429
+    # Bloqueada, ni la contraseña correcta sirve
+    assert cambiar(CLAVE_OK).status_code == 429
+    assert c.post("/api/login", json={"usuario": "luis@unahur.edu.ar", "password": CLAVE_OK}).status_code == 200
+
+    # Vencido el bloqueo se puede volver a intentar
+    conn = get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE Usuario SET bloqueo_password_hasta = '2000-01-01T00:00:00+00:00' WHERE usuario = ?",
+                ("luis@unahur.edu.ar",),
+            )
+    finally:
+        conn.close()
+    assert cambiar(CLAVE_OK).status_code == 200
+    assert c.post("/api/login", json={"usuario": "luis@unahur.edu.ar", "password": "Otra#Clave22"}).status_code == 200
+
+
+def test_28_migracion_agrega_columnas_de_usuario_y_conserva_el_instituto():
+    import sqlite3
+
+    from app.db.init_db import migrar
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # Esquema anterior: Usuario sin id_directivo ni columnas de intentos
+    conn.executescript(
+        """
+        CREATE TABLE Directivo (id_directivo INTEGER PRIMARY KEY, nombre TEXT, email TEXT);
+        CREATE TABLE Usuario (id_usuario INTEGER PRIMARY KEY, usuario TEXT, nombre TEXT, cargo TEXT,
+                              role TEXT, password_hash TEXT);
+        CREATE TABLE Solicitud_Registro (id_solicitud INTEGER PRIMARY KEY, email TEXT, estado TEXT,
+                                         id_directivo INTEGER);
+        INSERT INTO Directivo VALUES (2, 'Salud Comunitaria', 'salud@unahur.edu.ar');
+        INSERT INTO Usuario (usuario, nombre, cargo, role, password_hash) VALUES
+            ('ana@unahur.edu.ar', 'Ana', 'Docente', 'docente', 'x'),
+            ('admin@unahur.edu.ar', 'Admin', 'Desarrollador', 'admin', 'x');
+        INSERT INTO Solicitud_Registro VALUES (1, 'ana@unahur.edu.ar', 'aprobada', 2);
+        """
+    )
+    migrar(conn)
+    migrar(conn)    # idempotente: la segunda corrida no falla ni duplica nada
+    filas = {f["usuario"]: f for f in conn.execute("SELECT * FROM Usuario")}
+    assert filas["ana@unahur.edu.ar"]["id_directivo"] == 2
+    assert filas["admin@unahur.edu.ar"]["id_directivo"] is None
+    assert filas["ana@unahur.edu.ar"]["intentos_password"] == 0
+    assert filas["ana@unahur.edu.ar"]["bloqueo_password_hasta"] is None
