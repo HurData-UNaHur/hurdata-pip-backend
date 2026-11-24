@@ -49,7 +49,7 @@ def get_db() -> Iterator[sqlite3.Connection]:
 # Autorización de endpoints que modifican datos
 # ---------------------------------------------------------------------------
 
-def get_usuario_actual(token: str = Depends(oauth2_scheme)) -> dict:
+def get_usuario_actual(token: str = Depends(oauth2_scheme), conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """
     Valida el Bearer JWT y devuelve su payload con los permisos del rol.
     Lanza 401 si el token falta, es inválido o expiró.
@@ -61,6 +61,14 @@ def get_usuario_actual(token: str = Depends(oauth2_scheme)) -> dict:
         Authorization: Bearer <token>
     """
     payload = verificar_token(token)
+    # El rol y el estado de la cuenta se leen de la base en cada request: revocar un acceso o cambiar
+    # un rol rige de inmediato, aunque el token todavía no haya vencido.
+    cuenta = conn.execute(
+        "SELECT role, activo FROM Usuario WHERE usuario = ?", (payload.get("sub"),)
+    ).fetchone()
+    if cuenta is None or not cuenta["activo"]:
+        raise HTTPException(status_code=401, detail="La cuenta no existe o fue desactivada.")
+    payload["role"] = cuenta["role"]
     payload["permisos"] = permisos_de(payload.get("role"))
     return payload
 

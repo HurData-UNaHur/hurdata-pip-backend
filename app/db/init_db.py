@@ -34,6 +34,8 @@ def migrar(conn) -> None:
         )
     if "intentos_password" not in columnas:
         conn.execute("ALTER TABLE Usuario ADD COLUMN intentos_password INTEGER NOT NULL DEFAULT 0")
+    if "activo" not in columnas:
+        conn.execute("ALTER TABLE Usuario ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
     if "bloqueo_password_hasta" not in columnas:
         conn.execute("ALTER TABLE Usuario ADD COLUMN bloqueo_password_hasta TEXT")
 

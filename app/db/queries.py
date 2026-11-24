@@ -539,13 +539,18 @@ def resolver_solicitud_registro(
         raise ValueError("La solicitud no existe o ya fue resuelta.")
 
     if accion == "rechazar":
-        # Se elimina la fila para liberar el correo por si quiere volver a enviar la solicitud
+        # Se conserva la fila como historial. Si la persona vuelve a pedir el alta, se descarta
+        # (descartar_solicitud_rechazada) para liberar el correo, que es único.
         with conn:
             conn.execute(
-                "DELETE FROM Solicitud_Registro WHERE id_solicitud = ?",
-                (id_solicitud,),
+                """
+                UPDATE Solicitud_Registro
+                SET estado = 'rechazada', resuelto_por = ?, fecha_resolucion = ?
+                WHERE id_solicitud = ?
+                """,
+                (resuelto_por, ahora_utc(), id_solicitud),
             )
-        return "rechazada y eliminada"
+        return "rechazada"
 
     rol_final = rol_asignado or sol["role"]
     cargo_map = {
@@ -590,6 +595,62 @@ def buscar_usuario(conn: sqlite3.Connection, usuario: str) -> dict | None:
         (usuario,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def descartar_solicitud_rechazada(conn: sqlite3.Connection, email: str) -> None:
+    """Borra una solicitud rechazada anterior del mismo correo, para que pueda volver a pedir el alta."""
+    with conn:
+        conn.execute("DELETE FROM Solicitud_Registro WHERE email = ? AND estado = 'rechazada'", (email,))
+
+
+def listar_historial_solicitudes(conn: sqlite3.Connection, id_instituto: int | None = None) -> list[dict]:
+    """Solicitudes ya resueltas (aprobadas y rechazadas), de la más reciente a la más vieja."""
+    filtro = "AND s.id_directivo = ?" if id_instituto is not None else ""
+    parametros = (id_instituto,) if id_instituto is not None else ()
+    rows = conn.execute(
+        f"""
+        SELECT s.id_solicitud, s.email, s.nombre, s.role AS rol, d.nombre AS nombre_instituto,
+               s.estado, s.fecha_solicitud, s.fecha_resolucion,
+               s.resuelto_por, r.nombre AS nombre_resuelto_por
+        FROM Solicitud_Registro s
+        JOIN Directivo d ON d.id_directivo = s.id_directivo
+        LEFT JOIN Usuario r ON r.usuario = s.resuelto_por
+        WHERE s.estado != 'pendiente' {filtro}
+        ORDER BY s.fecha_resolucion DESC, s.id_solicitud DESC
+        """,
+        parametros,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def listar_usuarios(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT u.usuario, u.nombre, u.cargo, u.role, u.activo, d.nombre AS instituto
+        FROM Usuario u
+        LEFT JOIN Directivo d ON d.id_directivo = u.id_directivo
+        ORDER BY u.nombre COLLATE NOCASE, u.usuario
+        """
+    ).fetchall()
+    return [{**dict(r), "activo": bool(r["activo"])} for r in rows]
+
+
+def estado_cuenta(conn: sqlite3.Connection, usuario: str) -> dict | None:
+    """Rol vigente y si la cuenta está activa, tal como están hoy en la base (no en el token)."""
+    row = conn.execute(
+        "SELECT usuario, nombre, role, activo, id_directivo FROM Usuario WHERE usuario = ?", (usuario,)
+    ).fetchone()
+    return {**dict(row), "activo": bool(row["activo"])} if row else None
+
+
+def actualizar_rol_usuario(conn: sqlite3.Connection, usuario: str, rol: str, cargo: str) -> None:
+    with conn:
+        conn.execute("UPDATE Usuario SET role = ?, cargo = ? WHERE usuario = ?", (rol, cargo, usuario))
+
+
+def actualizar_activo_usuario(conn: sqlite3.Connection, usuario: str, activo: bool) -> None:
+    with conn:
+        conn.execute("UPDATE Usuario SET activo = ? WHERE usuario = ?", (1 if activo else 0, usuario))
 
 
 def obtener_perfil(conn: sqlite3.Connection, usuario: str) -> dict | None:

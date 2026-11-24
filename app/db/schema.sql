@@ -118,7 +118,9 @@ CREATE TABLE IF NOT EXISTS Usuario (
     id_directivo    INTEGER REFERENCES Directivo(id_directivo),
     -- Límite de intentos al cambiar la contraseña con la sesión iniciada
     intentos_password       INTEGER NOT NULL DEFAULT 0,
-    bloqueo_password_hasta  TEXT
+    bloqueo_password_hasta  TEXT,
+    -- 0 = acceso revocado por un Admin (no puede iniciar sesión ni usar un token vigente)
+    activo                  INTEGER NOT NULL DEFAULT 1
 );
 
 -- Un instituto por fila, con el email de su dirección (quien aprueba los registros).

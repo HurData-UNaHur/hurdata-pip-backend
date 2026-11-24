@@ -713,4 +713,90 @@ def test_28_migracion_agrega_columnas_de_usuario_y_conserva_el_instituto():
     assert filas["ana@unahur.edu.ar"]["id_directivo"] == 2
     assert filas["admin@unahur.edu.ar"]["id_directivo"] is None
     assert filas["ana@unahur.edu.ar"]["intentos_password"] == 0
+    assert filas["ana@unahur.edu.ar"]["activo"] == 1     # las cuentas existentes siguen activas
     assert filas["ana@unahur.edu.ar"]["bloqueo_password_hasta"] is None
+
+def test_29_gestion_de_usuarios_solo_admin(c):
+    estado = lambda usuario, activo, headers=H: c.post(
+        f"/api/usuarios/{usuario}/estado", headers=headers, json={"activo": activo}
+    )
+    rol = lambda usuario, nuevo, headers=H: c.post(
+        f"/api/usuarios/{usuario}/rol", headers=headers, json={"rol": nuevo}
+    )
+
+    # Solo quien tiene usuarios:gestionar (el Admin)
+    assert c.get("/api/usuarios").status_code == 401
+    assert c.get("/api/usuarios", headers=token_de(c, "directivo@unahur.edu.ar")).status_code == 403
+    assert c.get("/api/usuarios", headers=token_de_con(c, "docente@unahur.edu.ar", CLAVE_OK)).status_code == 403
+    assert rol("luis@unahur.edu.ar", "docente", token_de(c, "directivo@unahur.edu.ar")).status_code == 403
+
+    # La lista trae las cuentas con rol, instituto y estado, y nunca el hash
+    lista = c.get("/api/usuarios", headers=H).json()["usuarios"]
+    luis_fila = next(u for u in lista if u["usuario"] == "luis@unahur.edu.ar")
+    assert luis_fila["activo"] is True and luis_fila["role"] == "docente" and luis_fila["instituto"]
+    assert all("password_hash" not in u for u in lista)
+
+    # Validaciones de rol y de cuenta
+    assert rol("luis@unahur.edu.ar", "superusuario").status_code == 400
+    assert rol("nadie@unahur.edu.ar", "docente").status_code == 404
+    assert estado("nadie@unahur.edu.ar", False).status_code == 404
+    # Nadie se modifica a sí mismo
+    assert rol("admin@unahur.edu.ar", "docente").status_code == 403
+    assert estado("admin@unahur.edu.ar", False).status_code == 403
+
+    # Cambiar el rol rige de inmediato, aunque el token de Luis siga diciendo "docente"
+    luis = token_de_con(c, "luis@unahur.edu.ar", "Otra#Clave22")
+    assert c.get("/api/registro/solicitudes", headers=luis).status_code == 403
+    assert rol("luis@unahur.edu.ar", "directivo").status_code == 200
+    assert c.get("/api/registro/solicitudes", headers=luis).status_code == 200
+    assert next(u for u in c.get("/api/usuarios", headers=H).json()["usuarios"]
+                if u["usuario"] == "luis@unahur.edu.ar")["cargo"] == "Directivo"
+    assert rol("luis@unahur.edu.ar", "docente").status_code == 200
+
+    # Revocar: no puede iniciar sesión y su sesión abierta deja de servir
+    assert estado("luis@unahur.edu.ar", False).status_code == 200
+    asercion_login = c.post("/api/login", json={"usuario": "luis@unahur.edu.ar", "password": "Otra#Clave22"})
+    assert asercion_login.status_code == 403
+    assert c.post("/api/login", json={"usuario": "luis@unahur.edu.ar", "password": "Incorrecta#1"}).status_code == 401
+    assert c.get("/api/perfil", headers=luis).status_code == 401
+
+    # Reactivar: vuelve a entrar
+    assert estado("luis@unahur.edu.ar", True).status_code == 200
+    assert c.get("/api/perfil", headers=luis).status_code == 200
+    assert c.post("/api/login", json={"usuario": "luis@unahur.edu.ar", "password": "Otra#Clave22"}).status_code == 200
+
+
+def test_30_historial_de_solicitudes(c):
+    pedir = lambda email, instituto: c.post(
+        "/api/registro/solicitar", json=_pedido_registro(email, id_instituto=instituto)
+    )
+    pendientes = lambda: c.get("/api/registro/solicitudes", headers=H).json()["solicitudes"]
+    historial = lambda headers: c.get("/api/registro/historial", headers=headers)
+
+    assert historial({}).status_code == 401
+    assert historial(token_de_con(c, "docente@unahur.edu.ar", CLAVE_OK)).status_code == 403
+
+    # Una solicitud rechazada queda en el historial (ya no se borra)
+    assert pedir("rechazada@unahur.edu.ar", 2).status_code == 201
+    sol = next(s for s in pendientes() if s["email"] == "rechazada@unahur.edu.ar")
+    assert c.post(f"/api/registro/solicitudes/{sol['id_solicitud']}/rechazar", headers=H).status_code == 200
+    fila = next(s for s in historial(H).json()["solicitudes"] if s["email"] == "rechazada@unahur.edu.ar")
+    assert fila["estado"] == "rechazada"
+    assert fila["resuelto_por"] == "admin@unahur.edu.ar" and fila["nombre_resuelto_por"] == "Admin"
+    assert fila["fecha_resolucion"]
+
+    # El Admin ve también las aprobadas (Ana, del test 22)
+    todas = historial(H).json()["solicitudes"]
+    assert next(s for s in todas if s["email"] == "ana@unahur.edu.ar")["estado"] == "aprobada"
+    assert all(s["estado"] in ("aprobada", "rechazada") for s in todas)
+
+    # Un Directivo ve solo las de su instituto: Ana pidió el 1; la rechazada, el 2
+    del_directivo = historial(token_de(c, "directivo@unahur.edu.ar")).json()["solicitudes"]
+    correos = {s["email"] for s in del_directivo}
+    assert "ana@unahur.edu.ar" in correos
+    assert "rechazada@unahur.edu.ar" not in correos
+
+    # Tras un rechazo se puede volver a pedir, y la nueva queda pendiente (no en el historial)
+    assert pedir("rechazada@unahur.edu.ar", 2).status_code == 201
+    assert any(s["email"] == "rechazada@unahur.edu.ar" for s in pendientes())
+    assert all(s["email"] != "rechazada@unahur.edu.ar" for s in historial(H).json()["solicitudes"])

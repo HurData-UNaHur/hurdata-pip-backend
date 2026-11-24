@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import get_db
 from app.api.auth import validate_secret_key
-from app.api.routers import admin, cargas, consultas
+from app.api.routers import admin, cargas, consultas, usuarios
 from app.api.routers import auth as auth_router
 from app.config import config
 from app.db.init_db import init_db
@@ -85,6 +85,7 @@ app.add_middleware(
 app.include_router(consultas.router)   # GET  → lectura (públicos)
 app.include_router(admin.router)       # POST/DELETE → modifican datos (protegidos)
 app.include_router(auth_router.router) # POST /api/login, GET /api/institutos
+app.include_router(usuarios.router)   # gestión de cuentas e historial de solicitudes
 app.include_router(cargas.router)      # GET /api/cargas (historial, según permisos)
 
 

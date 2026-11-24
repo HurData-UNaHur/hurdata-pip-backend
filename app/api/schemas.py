@@ -211,6 +211,43 @@ class ResolverSolicitudIn(BaseModel):
     rol: str | None = None
 
 
+class UsuarioOut(BaseModel):
+    usuario: str
+    nombre: str
+    cargo: str
+    role: str
+    activo: bool
+    instituto: str | None = None
+
+
+class UsuariosOut(BaseModel):
+    usuarios: list[UsuarioOut]
+
+
+class CambiarRolIn(BaseModel):
+    rol: str
+
+
+class CambiarEstadoIn(BaseModel):
+    activo: bool
+
+
+class SolicitudHistorialOut(BaseModel):
+    id_solicitud: int
+    email: str
+    nombre: str
+    rol: str
+    nombre_instituto: str
+    estado: str                         # 'aprobada' | 'rechazada'
+    fecha_solicitud: str
+    fecha_resolucion: str | None = None
+    resuelto_por: str | None = None
+    nombre_resuelto_por: str | None = None
+
+
+class HistorialOut(BaseModel):
+    solicitudes: list[SolicitudHistorialOut]
+
 class PerfilOut(BaseModel):
     usuario: str
     nombre: str

@@ -85,6 +85,17 @@ def seed_db() -> None:
                         """,
                         (usuario, nombre, cargo, role, password_hash),
                     )
+        # El Directivo precargado pertenece a un instituto, para que la demo muestre el historial
+        # de solicitudes de su instituto (solo se completa si todavía no tiene uno).
+        with conn:
+            conn.execute(
+                """
+                UPDATE Usuario
+                SET id_directivo = (SELECT id_directivo FROM Directivo WHERE email = ?)
+                WHERE usuario = 'directivo@unahur.edu.ar' AND id_directivo IS NULL
+                """,
+                ("ingenieria@unahur.edu.ar",),
+            )
     finally:
         conn.close()
 

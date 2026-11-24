@@ -60,12 +60,15 @@ _ERROR_CODIGO = "El código es incorrecto o venció. Pedí uno nuevo."
 def login(body: LoginIn, conn=Depends(get_db)):
     """Autentica un usuario y devuelve un JWT Bearer. 401 si usuario o contraseña no coinciden."""
     row = conn.execute(
-        "SELECT usuario, nombre, cargo, role, password_hash FROM Usuario WHERE usuario = ?",
+        "SELECT usuario, nombre, cargo, role, password_hash, activo FROM Usuario WHERE usuario = ?",
         (normalizar_email(body.usuario),),
     ).fetchone()
 
     if row is None or not verificar_password(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
+    if not row["activo"]:
+        # Se avisa recién con la contraseña correcta, para no revelar qué cuentas existen
+        raise HTTPException(status_code=403, detail="Tu acceso fue revocado. Consultá con un administrador.")
 
     token = crear_token({
         "sub": row["usuario"],
@@ -170,6 +173,8 @@ def solicitar_registro(body: SolicitudRegistroIn, conn=Depends(get_db)):
 
     if conn.execute("SELECT 1 FROM Usuario WHERE usuario = ?", (email,)).fetchone():
         raise HTTPException(status_code=409, detail="Ese correo ya está registrado.")
+
+    queries.descartar_solicitud_rechazada(conn, email)   # una solicitud rechazada antes no impide pedir de nuevo
 
     try:
         queries.crear_solicitud_registro(
