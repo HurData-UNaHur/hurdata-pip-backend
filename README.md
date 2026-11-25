@@ -8,6 +8,7 @@ Los reportes nativos del sistema (como las estadísticas de fin de cursada) suel
 * **Privacidad por Diseño (Privacy-First):** Configuración estricta de repositorios y entornos para garantizar que los archivos con datos sensibles de la universidad nunca se expongan en la nube pública.
 * **API RESTful:** Endpoints rápidos y documentados, organizados por responsabilidad (consultas vs. administración). Las operaciones que modifican datos exigen un usuario con sesión (JWT) y el permiso correspondiente a su rol.
 * **Roles y permisos:** cuatro roles (Admin, Directivo, Docente, No Docente) con permisos centralizados en un solo archivo, e historial de quién cargó cada Excel.
+* **Cuentas y accesos:** registro y recuperación de contraseña por solicitud (sin servidor de mail), Mi cuenta con cambio de contraseña y límite de intentos, y gestión de cuentas por el Admin (cambiar rol, revocar y reactivar acceso). El rol y el estado de la cuenta se leen de la base en cada pedido.
 
 ---
 
@@ -141,6 +142,12 @@ Los endpoints protegidos esperan el header `Authorization: Bearer <token>`, con 
 | `POST` | `/api/registro/solicitudes/{id}/{aprobar\|rechazar}` | `registros:aprobar` | Aprueba (con el rol a asignar, opcional) o rechaza una solicitud de alta |
 | `GET` | `/api/recuperacion/solicitudes` | `registros:aprobar` | Solicitudes de recuperación pendientes |
 | `POST` | `/api/recuperacion/solicitudes/{id}/{aprobar\|rechazar}` | `registros:aprobar` | Aprobar devuelve el código de un solo uso, una única vez |
+| `GET` | `/api/registro/historial` | `registros:aprobar` | Solicitudes de alta ya resueltas (aprobadas y rechazadas). El Admin ve todas; el Directivo, las de su instituto |
+| `GET` | `/api/perfil` | cualquier usuario con sesión | Datos de la cuenta: nombre, correo, cargo, rol e instituto |
+| `POST` | `/api/perfil/cambiar-password` | cualquier usuario con sesión | Cambia la contraseña: `{password_actual, password_nueva}`. Tras 5 errores seguidos bloquea el cambio 15 minutos (429) |
+| `GET` | `/api/usuarios` | `usuarios:gestionar` | Lista de cuentas con rol, instituto y estado |
+| `POST` | `/api/usuarios/{usuario}/rol` | `usuarios:gestionar` | Cambia el rol de otra cuenta: `{rol}` |
+| `POST` | `/api/usuarios/{usuario}/estado` | `usuarios:gestionar` | Revoca o reactiva el acceso de otra cuenta: `{activo}` |
 
 Si un `POST /upload` apunta a un período y carrera que ya tienen datos, los reemplaza, pero solo si quien sube es el dueño de esa carga, un Directivo o un Admin. En otro caso responde 403.
 
@@ -161,13 +168,13 @@ Todo está en `app/api/permisos.py`: ahí se asignan los permisos a cada rol y e
 
 Ver los datos (períodos, carreras, datos, evolución) no requiere permiso. El usuario **No Docente** solo consulta.
 
-El permiso `registros:aprobar` lo usan los endpoints de solicitudes de registro y de recuperación. El permiso `usuarios:gestionar` está definido, pero todavía no tiene pantallas ni endpoints propios; hoy solo decide quién puede restablecer cuentas Admin y Directivo.
+El permiso `registros:aprobar` lo usan los endpoints de solicitudes de registro y de recuperación. El permiso `usuarios:gestionar` (solo Admin) habilita los endpoints de `/api/usuarios` y decide quién puede restablecer cuentas Admin y Directivo.
 
 ### Registro y recuperación de contraseña
 
 **Reglas.** El correo tiene que ser `nombre@unahur.edu.ar`. La contraseña nueva tiene entre 8 y 72 caracteres, con una mayúscula, una minúscula, un número y un símbolo, y distinta de la anterior. El login no aplica estas reglas: solo exige usuario y contraseña. Las reglas viven en `app/api/validaciones.py` y el frontend las repite solo para avisar mientras se escribe.
 
-**Registro.** La persona pide el alta con su instituto y un rol. Un Directivo o un Admin la ve en la campana de solicitudes y la aprueba (pudiendo cambiar el rol) o la rechaza. Hoy cualquier Directivo ve las solicitudes de todos los institutos.
+**Registro.** La persona pide el alta con su instituto y un rol. Un Directivo o un Admin la ve en la sección Accesos del frontend y la aprueba (pudiendo cambiar el rol) o la rechaza. La cuenta queda asociada al instituto que eligió. Hoy cualquier Directivo ve las solicitudes pendientes de todos los institutos. Las solicitudes rechazadas no se borran: quedan en el historial (si la persona vuelve a pedir el alta, se descarta la rechazada anterior).
 
 **Recuperación (sin servidor de mail).**
 1. La persona pide la recuperación con su correo.
@@ -175,6 +182,14 @@ El permiso `registros:aprobar` lo usan los endpoints de solicitudes de registro 
 3. Quien aprueba le pasa el código a la persona (en persona, por teléfono o chat), que lo canjea y elige su nueva contraseña.
 
 Reglas de seguridad: nadie puede aprobar su propia solicitud; las cuentas Admin y Directivo solo las restablece un Admin; el código se bloquea tras 5 intentos fallidos; un código nuevo reemplaza al anterior; y si el Admin pierde su contraseña, la restablece otro Admin o se hace a mano en la base. Cambiar el código por un mail es agregar el envío en `aprobar` sin tocar el resto.
+
+### Mi cuenta y gestión de cuentas
+
+**Cambio de contraseña.** `POST /api/perfil/cambiar-password` pide la contraseña actual. Si está mal responde 400 (no 401, para no confundirlo con una sesión vencida) y avisa cuántos intentos quedan. Al quinto error seguido bloquea el cambio 15 minutos y responde 429, aunque después se escriba la contraseña correcta. Un cambio exitoso reinicia el contador. Los contadores están en la tabla `Usuario` (`intentos_password` y `bloqueo_password_hasta`).
+
+**Gestión de cuentas (solo Admin).** Cambiar el rol y revocar o reactivar el acceso. Nadie puede modificar su propia cuenta, así que siempre queda al menos un Admin. Una cuenta revocada no puede iniciar sesión (403 con la contraseña correcta) y su sesión abierta deja de valer (401): `get_usuario_actual` lee el rol y el estado de la base en cada pedido, así que cambiar un rol o revocar un acceso rige de inmediato, sin esperar a que venza el token.
+
+**Migración.** Las columnas `id_directivo` (instituto), `activo` y las de intentos se agregan a `Usuario` al arrancar si la base es anterior (`migrar` en `init_db.py`); las cuentas creadas por solicitud conservan el instituto que eligieron. Las cuentas precargadas no tienen instituto, salvo `directivo@`, que pertenece a Tecnología e Ingeniería.
 
 ### Usuarios precargados
 
@@ -205,6 +220,8 @@ FastAPI genera automáticamente una interfaz para explorar y probar los endpoint
 ```bash
 pytest tests/
 ```
+
+Son 35 tests: `test_api.py` cubre login, permisos por rol, carga, reemplazo, borrado, historial, registro, recuperación de contraseña, Mi cuenta, límite de intentos, migración de la base, gestión de cuentas e historial de solicitudes; `test_transformer.py` cubre el ETL.
 
 ### Inspeccionar la base de datos
 
@@ -276,13 +293,14 @@ hurdata-pip-backend/
 │   │   ├── schemas.py           # Modelos Pydantic de entrada/salida
 │   │   └── routers/
 │   │       ├── consultas.py     # GET de períodos, carreras, datos y evolución
-│   │       ├── auth.py          # login, institutos, solicitudes de registro y recuperación de contraseña
+│   │       ├── auth.py          # login, institutos, registro, recuperación de contraseña y Mi cuenta
+│   │       ├── usuarios.py      # gestión de cuentas (Admin) e historial de solicitudes
 │   │       ├── cargas.py        # GET /api/cargas, /api/carga-activa (historial)
 │   │       └── admin.py         # POST /upload, DELETE /api/... (piden permiso)
 │   ├── db/
-│   │   ├── schema.sql           # Definición del DER (tablas académicas, Usuario, Directivo y Carga)
+│   │   ├── schema.sql           # Definición del DER (tablas académicas, Usuario, Directivo, Carga y solicitudes)
 │   │   ├── connection.py        # get_connection(): una conexión SQLite nueva por request
-│   │   ├── init_db.py           # Inicializa tablas al arrancar
+│   │   ├── init_db.py           # Inicializa tablas al arrancar y migra bases anteriores
 │   │   ├── seed.py              # Institutos y usuarios precargados (se corre en cada arranque)
 │   │   ├── reset_db.py          # Vacía las tablas académicas
 │   │   ├── loader.py            # Persiste el dict del ETL en la DB
@@ -305,7 +323,7 @@ hurdata-pip-backend/
 
 ## Decisiones de arquitectura relevantes
 
-**Separación consultas / administración:** los endpoints de lectura de datos (`routers/consultas.py`) son públicos para que funcione el modo invitado del frontend. Los que modifican datos (`routers/admin.py`) piden un JWT y un permiso.
+**Separación consultas / administración:** los endpoints de lectura de datos (`routers/consultas.py`) son públicos en la API (sirven para pruebas y herramientas externas); el frontend ya no tiene modo invitado y exige iniciar sesión. Los que modifican datos (`routers/admin.py`) piden un JWT y un permiso.
 
 **Permisos, no roles:** cada endpoint declara el permiso que necesita con `Depends(require_permiso(...))` y nunca pregunta por un rol. La tabla de qué rol tiene qué permiso vive solo en `app/api/permisos.py`.
 
